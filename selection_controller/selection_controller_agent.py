@@ -8,27 +8,6 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# --- Helper for metric optimization direction (v2) ---
-# True if higher score is better, False if lower score is better
-METRIC_OPTIMIZATION_DIRECTION = {
-    "correctness": True,
-    "pylint_score": True,
-    "maintainability_index": True,
-    "passed_tests": True, # More passed tests is better
-    "runtime_ms": False,
-    "cyclomatic_complexity_avg": False,
-    # Add other metrics here as they are introduced
-}
-DEFAULT_METRIC_VALUE = {
-    "correctness": 0.0,
-    "pylint_score": -1.0, # Pylint usually 0-10
-    "maintainability_index": -1.0, # MI usually 0-100
-    "passed_tests": 0.0,
-    "runtime_ms": float('inf'),
-    "cyclomatic_complexity_avg": float('inf'),
-}
-# ---
-
 
 class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
     def __init__(self):  # Unchanged
@@ -46,14 +25,14 @@ class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
         # 1. Correctness from I/O examples (always important if available)
         # Higher is better, so for ascending sort, we'd use -correctness if sorting everything ascending.
         # Or, rely on reverse=True later and keep it positive. Let's use positive for now.
-        correctness = program.fitness_scores.get("correctness", DEFAULT_METRIC_VALUE["correctness"])
+        correctness = program.fitness_scores.get("correctness", settings.DEFAULT_METRIC_VALUE["correctness"])
         key_parts.append(correctness)
 
         # 2. Primary Focus Metrics from TaskDefinition (if in "general_refinement" or specified)
         if task.primary_focus_metrics:
             for metric_name in task.primary_focus_metrics:
-                value = program.fitness_scores.get(metric_name, DEFAULT_METRIC_VALUE.get(metric_name, 0.0))
-                higher_is_better = METRIC_OPTIMIZATION_DIRECTION.get(metric_name, True)  # Default to True if unknown
+                value = program.fitness_scores.get(metric_name, settings.DEFAULT_METRIC_VALUE.get(metric_name, 0.0))
+                higher_is_better = settings.METRIC_OPTIMIZATION_DIRECTION.get(metric_name, True)  # Default to True if unknown
 
                 if higher_is_better:
                     key_parts.append(value)  # Will be sorted descending by reverse=True
@@ -234,34 +213,3 @@ class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
                                          kwargs['population_size'], task)
         else:
             raise ValueError(f"Unknown action: {action}")
-
-# Example Usage:
-if __name__ == '__main__':
-    import uuid
-    logging.basicConfig(level=logging.DEBUG)
-    selector = SelectionControllerAgent()
-
-    # Create some sample programs
-    programs = [
-        Program(id=str(uuid.uuid4()), code="c1", fitness_scores={"correctness": 0.9, "runtime_ms": 100}, status="evaluated"),
-        Program(id=str(uuid.uuid4()), code="c2", fitness_scores={"correctness": 1.0, "runtime_ms": 50}, status="evaluated"),
-        Program(id=str(uuid.uuid4()), code="c3", fitness_scores={"correctness": 0.7, "runtime_ms": 200}, status="evaluated"),
-        Program(id=str(uuid.uuid4()), code="c4", fitness_scores={"correctness": 1.0, "runtime_ms": 60}, status="evaluated"), # Duplicate high correctness
-        Program(id=str(uuid.uuid4()), code="c5", fitness_scores={"correctness": 0.5}, status="evaluated"), # Missing runtime
-        Program(id=str(uuid.uuid4()), code="c6", status="unevaluated"), # Unevaluated
-    ]
-
-    print("--- Testing Parent Selection ---")
-    parents = selector.select_parents(programs, num_parents=3)
-    for p in parents:
-        print(f"Selected Parent: {p.id}, Correctness: {p.fitness_scores.get('correctness')}, Runtime: {p.fitness_scores.get('runtime_ms')}")
-
-    print("\n--- Testing Survivor Selection ---")
-    current_pop = programs[:2] # p1, p2
-    offspring_pop = [
-        Program(id=str(uuid.uuid4()), code="off1", fitness_scores={"correctness": 1.0, "runtime_ms": 40}, status="evaluated"), # Better than p2
-        Program(id=str(uuid.uuid4()), code="off2", fitness_scores={"correctness": 0.6, "runtime_ms": 10}, status="evaluated"),
-    ]
-    survivors = selector.select_survivors(current_pop, offspring_pop, population_size=2)
-    for s in survivors:
-        print(f"Survivor: {s.id}, Correctness: {s.fitness_scores.get('correctness')}, Runtime: {s.fitness_scores.get('runtime_ms')}") 

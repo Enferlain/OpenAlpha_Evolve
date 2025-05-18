@@ -1,4 +1,3 @@
-# Database Agent 
 import logging
 from typing import List, Dict, Any, Optional, Literal
 import uuid
@@ -129,62 +128,3 @@ class InMemoryDatabaseAgent(DatabaseAgentInterface, BaseAgent):
     async def execute(self, *args, **kwargs) -> Any:
         logger.warning("InMemoryDatabaseAgent.execute() called, but this agent uses specific methods for DB operations.")
         raise NotImplementedError("InMemoryDatabaseAgent does not have a generic execute. Use specific methods like save_program, get_program etc.")
-
-# Example Usage (for testing purposes)
-if __name__ == "__main__":
-    import asyncio # Make sure asyncio is imported for the test runner
-    async def test_db():
-        logging.basicConfig(level=logging.DEBUG)
-        db = InMemoryDatabaseAgent()
-
-        prog1 = Program(id="prog_001", code="print('hello')", generation=0, fitness_scores={"correctness_score": 0.8, "runtime_ms": 100})
-        prog2 = Program(id="prog_002", code="print('world')", generation=0, fitness_scores={"correctness_score": 0.9, "runtime_ms": 50})
-        prog3 = Program(id="prog_003", code="print('test')", generation=1, fitness_scores={"correctness_score": 0.85, "runtime_ms": 70})
-
-        await db.save_program(prog1)
-        await db.save_program(prog2)
-        await db.save_program(prog3)
-
-        retrieved_prog = await db.get_program("prog_001")
-        assert retrieved_prog is not None and retrieved_prog.code == "print('hello')"
-
-        all_programs = await db.get_all_programs()
-        assert len(all_programs) == 3
-
-        best_correctness = await db.get_best_programs(task_id="test_task", limit=2, objective="correctness", sort_order="desc")
-        print(f"Best by correctness (desc): {[p.id for p in best_correctness]}")
-        assert len(best_correctness) == 2
-        assert best_correctness[0].id == "prog_002" # 0.9
-        assert best_correctness[1].id == "prog_003" # 0.85
-
-        best_runtime_asc = await db.get_best_programs(task_id="test_task", limit=2, objective="runtime_ms", sort_order="asc")
-        print(f"Best by runtime (asc): {[p.id for p in best_runtime_asc]}")
-        assert len(best_runtime_asc) == 2
-        assert best_runtime_asc[0].id == "prog_002" # 50ms
-        assert best_runtime_asc[1].id == "prog_003" # 70ms
-        
-        best_runtime_desc = await db.get_best_programs(task_id="test_task", limit=2, objective="runtime_ms", sort_order="desc")
-        print(f"Best by runtime (desc): {[p.id for p in best_runtime_desc]}")
-        assert len(best_runtime_desc) == 2
-        assert best_runtime_desc[0].id == "prog_001" # 100ms
-        assert best_runtime_desc[1].id == "prog_003" # 70ms
-
-        # Test get_programs_for_next_generation
-        next_gen_programs = await db.get_programs_for_next_generation(task_id="test_task", generation_size=2)
-        print(f"Next gen programs (size 2): {[p.id for p in next_gen_programs]}")
-        assert len(next_gen_programs) == 2
-
-        next_gen_programs_all = await db.get_programs_for_next_generation(task_id="test_task", generation_size=5)
-        print(f"Next gen programs (size 5, all): {[p.id for p in next_gen_programs_all]}")
-        assert len(next_gen_programs_all) == 3 # Since only 3 programs exist
-
-        gen0_programs = await db.get_programs_by_generation(0)
-        assert len(gen0_programs) == 2
-
-        assert await db.count_programs() == 3
-        
-        await db.clear_database()
-        assert await db.count_programs() == 0
-        print("InMemoryDatabaseAgent tests passed.")
-
-    asyncio.run(test_db()) 

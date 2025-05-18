@@ -1,4 +1,3 @@
-# Core components, interfaces, data models 
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Union, Literal # Added Literal_v2
 from dataclasses import dataclass, field

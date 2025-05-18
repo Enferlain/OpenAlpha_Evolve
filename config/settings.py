@@ -36,7 +36,8 @@ EVALUATION_TIMEOUT_SECONDS = 800  # Max time for a program to run during evaluat
 
 # Database settings (using a simple in-memory store for now)
 DATABASE_TYPE = "in_memory" # or "sqlite", "postgresql" in the future
-DATABASE_PATH = "program_database.json" # Path for file-based DB
+# DATABASE_PATH = "program_database.json" # Before
+DATABASE_PATH = "alpha_evolve_programs.db" # After, to match SQLite agent default or desired .db name
 
 # Logging Parameters
 LOG_LEVEL = "INFO" # DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -49,6 +50,15 @@ API_RETRY_DELAY_SECONDS = 10 # Initial delay, will be exponential
 # Placeholder for RL Fine-Tuning (if implemented)
 RL_TRAINING_INTERVAL_GENERATIONS = 50 # Fine-tune RL model every N generations
 RL_MODEL_PATH = "rl_finetuner_model.pth"
+
+METRIC_OPTIMIZATION_DIRECTION = {
+    "correctness": True, "pylint_score": True, "maintainability_index": True,
+    "passed_tests": True, "runtime_ms": False, "cyclomatic_complexity_avg": False,
+}
+DEFAULT_METRIC_VALUE = {
+    "correctness": 0.0, "pylint_score": -1.0, "maintainability_index": -1.0,
+    "passed_tests": 0.0, "runtime_ms": float('inf'), "cyclomatic_complexity_avg": float('inf'),
+}
 
 # Monitoring (if implemented)
 MONITORING_DASHBOARD_URL = "http://localhost:8080" # Example

@@ -1,13 +1,14 @@
 import logging
 import asyncio
 import random
-import uuid  # Make sure uuid is imported, it's used for program_id
+import time # For timing generations and total run
 from typing import List, Dict, Any, Optional
 
 from core.interfaces import (
     TaskManagerInterface, TaskDefinition, Program, BaseAgent,
     PromptDesignerInterface, CodeGeneratorInterface, EvaluatorAgentInterface,
-    DatabaseAgentInterface, SelectionControllerInterface
+    DatabaseAgentInterface, SelectionControllerInterface,
+    MonitoringAgentInterface # <--- ADD THIS!
 )
 from config import settings
 
@@ -18,6 +19,7 @@ from evaluator_agent.evaluator_agent import EvaluatorAgent
 from database_agent.database_agent import InMemoryDatabaseAgent  # Using InMemory for now
 from database_agent.sqlite_database_agent import SQLiteDatabaseAgent # New!
 from selection_controller.selection_controller_agent import SelectionControllerAgent
+from monitoring_agent.monitoring_agent import MonitoringAgent # Import the concrete agent
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ class TaskManagerAgent(TaskManagerInterface):
         # self.database: DatabaseAgentInterface = InMemoryDatabaseAgent()
         self.database: DatabaseAgentInterface = SQLiteDatabaseAgent()  # New!
         self.selection_controller: SelectionControllerInterface = SelectionControllerAgent()
+        self.monitoring_agent: MonitoringAgentInterface = MonitoringAgent() # Initialize MonitoringAgent
 
         self.crossover_rate = settings.CROSSOVER_RATE # e.g., 0.2 from settings
         self.min_parents_for_crossover = 2 # Typically 2
@@ -39,6 +42,8 @@ class TaskManagerAgent(TaskManagerInterface):
         self.population_size = settings.POPULATION_SIZE
         self.num_generations = settings.GENERATIONS
         self.num_parents_to_select = self.population_size // 2
+
+        self.start_time_overall_run: Optional[float] = None  # For total run time
 
     async def initialize_population(self) -> List[Program]:  # Method_v2
         logger.info(
@@ -129,6 +134,61 @@ class TaskManagerAgent(TaskManagerInterface):
         logger.info(f"Initialized population with {len(initial_population)} programs.")
         return initial_population
 
+    def _calculate_population_metrics(self, population: List[Program]) -> Dict[str, Any]:  # Method_v1.0.0 (New helper)
+        """Calculates summary statistics for a population."""
+        if not population:
+            return {
+                "avg_correctness": 0.0, "best_correctness": 0.0,
+                "avg_pylint_score": 0.0, "best_pylint_score": 0.0,
+                "avg_runtime_ms": float('inf'), "best_runtime_ms": float('inf'),
+                "avg_cyclomatic_complexity": float('inf'), "best_cyclomatic_complexity": float('inf'),
+                "avg_maintainability_index": 0.0, "best_maintainability_index": 0.0,
+            }
+
+        metrics = {
+            "correctness": [], "pylint_score": [], "runtime_ms": [],
+            "cyclomatic_complexity_avg": [], "maintainability_index": []
+        }
+
+        for prog in population:
+            if prog.status == "evaluated":  # Only consider evaluated programs for metrics
+                metrics["correctness"].append(prog.fitness_scores.get("correctness", 0.0))
+                metrics["pylint_score"].append(
+                    prog.fitness_scores.get("pylint_score", settings.DEFAULT_METRIC_VALUE.get("pylint_score", -1.0)))
+                metrics["runtime_ms"].append(prog.fitness_scores.get("runtime_ms", float('inf')))
+                metrics["cyclomatic_complexity_avg"].append(
+                    prog.fitness_scores.get("cyclomatic_complexity_avg", float('inf')))
+                metrics["maintainability_index"].append(prog.fitness_scores.get("maintainability_index",
+                                                                                settings.DEFAULT_METRIC_VALUE.get(
+                                                                                    "maintainability_index", -1.0)))
+
+        # Helper to safely calculate avg/min/max
+        def safe_avg(values, default=0.0):
+            valid_values = [v for v in values if v is not None and v != float('inf') and v != float('-inf')]
+            return sum(valid_values) / len(valid_values) if valid_values else default
+
+        def safe_min(values, default=float('inf')):  # For "lower is better" metrics
+            valid_values = [v for v in values if v is not None]
+            return min(valid_values) if valid_values else default
+
+        def safe_max(values, default=0.0):  # For "higher is better" metrics
+            valid_values = [v for v in values if v is not None]
+            return max(valid_values) if valid_values else default
+
+        summary = {
+            "avg_correctness": safe_avg(metrics["correctness"]),
+            "best_correctness": safe_max(metrics["correctness"]),
+            "avg_pylint_score": safe_avg(metrics["pylint_score"]),
+            "best_pylint_score": safe_max(metrics["pylint_score"], default=-10.0),  # Pylint can be negative
+            "avg_runtime_ms": safe_avg(metrics["runtime_ms"], default=float('inf')),
+            "best_runtime_ms": safe_min(metrics["runtime_ms"]),
+            "avg_cyclomatic_complexity": safe_avg(metrics["cyclomatic_complexity_avg"], default=float('inf')),
+            "best_cyclomatic_complexity": safe_min(metrics["cyclomatic_complexity_avg"]),
+            "avg_maintainability_index": safe_avg(metrics["maintainability_index"]),
+            "best_maintainability_index": safe_max(metrics["maintainability_index"]),
+        }
+        return summary
+
     async def evaluate_population(self, population: List[Program]) -> List[Program]:
         logger.info(f"Evaluating population of {len(population)} programs.")
         evaluated_programs = []
@@ -150,9 +210,11 @@ class TaskManagerAgent(TaskManagerInterface):
         logger.info(f"Finished evaluating population. {len(evaluated_programs)} programs processed.")
         return evaluated_programs
 
-    async def manage_evolutionary_cycle(self):  # Method_v3 (with Crossover)
+    async def manage_evolutionary_cycle(self) -> List[Program]:  # Method_v6 (with LLM Call Count Monitoring)
         logger.info(
             f"Starting evolutionary cycle for task: {self.task_definition.id} (Mode: {self.task_definition.improvement_mode})")
+        self.start_time_overall_run = time.monotonic()
+
         if isinstance(self.database, SQLiteDatabaseAgent):
             await self.database.setup_db()
 
@@ -160,43 +222,39 @@ class TaskManagerAgent(TaskManagerInterface):
         current_population = await self.evaluate_population(current_population)
 
         for gen in range(1, self.num_generations + 1):
+            start_time_generation = time.monotonic()
+            if hasattr(self.code_generator, 'reset_api_call_count_generation'):
+                self.code_generator.reset_api_call_count_generation()
+
             logger.info(f"--- Generation {gen}/{self.num_generations} ---")
 
             parents = self.selection_controller.select_parents(
-                current_population,
-                self.num_parents_to_select,
-                # This might need to be self.population_size if all offspring come from selection
-                self.task_definition
+                current_population, self.num_parents_to_select, self.task_definition
             )
-            if not parents or len(parents) < 1:  # Need at least one parent for mutation
-                logger.warning(
-                    f"Generation {gen}: Not enough parents selected ({len(parents)}). Ending evolution early.")
+            if not parents:
+                logger.warning(f"Generation {gen}: No parents selected. Ending evolution early.")
                 break
             logger.info(f"Generation {gen}: Selected {len(parents)} parents for reproduction.")
 
-            offspring_population: List[Program] = []  # Explicitly typed
-
-            # We aim to fill up to self.population_size with new offspring
-            # Elitism is handled by select_survivors later by combining current_population and offspring_population
+            offspring_population: List[Program] = []
             num_offspring_to_generate = self.population_size
+            num_newly_generated_offspring = 0  # Initialize counter for successfully generated offspring
 
             generation_tasks = []
-
             for i in range(num_offspring_to_generate):
-                # Decide between Crossover and Mutation
                 if len(parents) >= self.min_parents_for_crossover and random.random() < self.crossover_rate:
-                    # Perform Crossover
-                    p1, p2 = random.sample(parents, 2)  # Select two distinct parents
-                    child_id = f"{self.task_definition.id}_gen{gen}_cross{i}"
-                    logger.debug(f"Attempting crossover for offspring {child_id} between {p1.id} and {p2.id}")
-                    generation_tasks.append(self.generate_crossover_offspring(p1, p2, gen, child_id))
+                    if len(parents) < 2:  # Ensure enough parents for sampling
+                        logger.debug("Not enough parents for crossover, defaulting to mutation for this offspring.")
+                        parent_for_mutation = random.choice(parents)  # Should not happen if initial check passes
+                        child_id = f"{self.task_definition.id}_gen{gen}_mut{i}"
+                        generation_tasks.append(self.generate_offspring(parent_for_mutation, gen, child_id))
+                    else:
+                        p1, p2 = random.sample(parents, 2)
+                        child_id = f"{self.task_definition.id}_gen{gen}_cross{i}"
+                        generation_tasks.append(self.generate_crossover_offspring(p1, p2, gen, child_id))
                 else:
-                    # Perform Mutation (or Bug Fix)
                     parent_for_mutation = random.choice(parents)
                     child_id = f"{self.task_definition.id}_gen{gen}_mut{i}"
-                    logger.debug(
-                        f"Attempting mutation/bug_fix for offspring {child_id} from parent {parent_for_mutation.id}")
-                    # generate_offspring handles mutation/bug_fix logic
                     generation_tasks.append(self.generate_offspring(parent_for_mutation, gen, child_id))
 
             if generation_tasks:
@@ -205,78 +263,76 @@ class TaskManagerAgent(TaskManagerInterface):
                     if isinstance(result, Program):
                         offspring_population.append(result)
                         await self.database.save_program(result)
+                        num_newly_generated_offspring += 1  # Increment for successful offspring
                     elif isinstance(result, Exception):
                         logger.error(f"Error during offspring generation task: {result}", exc_info=result)
-                    # If result is None (generation method decided not to produce offspring), it's skipped.
 
-            logger.info(f"Generation {gen}: Generated {len(offspring_population)} new offspring candidates.")
+            logger.info(f"Generation {gen}: Generated {num_newly_generated_offspring} new offspring candidates.")
 
             if offspring_population:
                 offspring_population = await self.evaluate_population(offspring_population)
 
-            # Combine current population (which might contain elites from previous gen) with new offspring
-            # The selection_controller.select_survivors will then pick the best to form the next generation.
-            # Note: current_population here is from *before* new offspring were made.
-            # If elitism is handled by select_parents carrying them over, that's one way.
-            # More commonly, select_survivors takes (previous_generation_survivors + new_offspring)
-            # Let's assume current_population is the survivors from the *end* of generation gen-1.
-
             current_population = self.selection_controller.select_survivors(
-                current_population,  # Survivors from gen-1
-                offspring_population,  # Newly created and evaluated children for gen
-                self.population_size,
-                self.task_definition
+                current_population, offspring_population, self.population_size, self.task_definition
             )
             logger.info(f"Generation {gen}: New population size after survival: {len(current_population)}.")
 
-            # Logging best program of the generation
+            # Log best program of this generation using SelectionController's sorting
             if current_population:
-                # Sort current_population by the same key used in selection to find the 'best'
-                # This requires SelectionControllerAgent to expose its sorting key or for TaskManager to replicate it.
-                # For now, let's use a simplified sort here for logging, assuming higher correctness is better.
-                # A more robust way would be to have selection_controller return the best, or use the same sort key.
-                temp_sorted_for_log = sorted(
-                    current_population,
-                    key=lambda p: (
-                        p.fitness_scores.get("correctness", 0.0),
-                        # Add other primary metrics if needed for a more accurate "best" log here
-                        -p.fitness_scores.get("runtime_ms", float('inf'))  # Example tie-breaker
-                    ),
-                    reverse=True
-                )
-                best_program_this_gen = temp_sorted_for_log[0]
-                logger.info(
-                    f"Generation {gen}: Best program in new pop: ID={best_program_this_gen.id}, Fitness={best_program_this_gen.fitness_scores}")
-            else:
-                logger.warning(
-                    f"Generation {gen}: No programs in current population after survival selection. Ending evolution.")
-                break  # End evolution if population becomes empty
+                sorted_for_log = self.selection_controller.sort_programs(current_population, self.task_definition)
+                if sorted_for_log:
+                    best_program_this_gen = sorted_for_log[0]
+                    logger.info(
+                        f"Generation {gen}: Best program in new pop: ID={best_program_this_gen.id}, Fitness={best_program_this_gen.fitness_scores}")
+                else:
+                    logger.warning(f"Generation {gen}: Sorting the current population for logging yielded no results.")
+
+            # --- Monitoring Step for this Generation ---
+            generation_time_sec = time.monotonic() - start_time_generation
+            population_metrics = self._calculate_population_metrics(current_population)  # Helper method to compute stats
+
+            llm_calls_this_generation = 0
+            if hasattr(self.code_generator, 'get_api_call_count_generation'):
+                llm_calls_this_generation = self.code_generator.get_api_call_count_generation()
+
+            generation_log_data = {
+                "task_id": self.task_definition.id,
+                "generation_number": gen,
+                "population_size": len(current_population),
+                "num_offspring_generated": num_newly_generated_offspring,
+                **population_metrics,
+                "generation_time_sec": round(generation_time_sec, 2),
+                "llm_api_calls_generation": llm_calls_this_generation
+            }
+            await self.monitoring_agent.execute("log_generation_metrics", payload=generation_log_data)
+            # --- End Monitoring Step ---
+
+            if not current_population:
+                logger.warning(f"Generation {gen}: No programs in current population. Ending evolution.")
+                break
 
         logger.info("Evolutionary cycle completed.")
-        # --- Fetching overall best program using new selection logic from database ---
-        # The DatabaseAgent's get_best_programs might need an update to use a similar dynamic sorting key
-        # or we fetch all and sort here. For now, let's assume it has a reasonable default or we enhance it later.
-        # A simple way for now: fetch more programs and re-sort them using SelectionController's logic.
-        all_evaluated_programs = await self.database.get_all_programs()  # Assuming get_all_programs is now in interface
-        if all_evaluated_programs:
-            # Filter for only evaluated programs *before* sorting
-            candidate_programs = [p for p in all_evaluated_programs if p.status == "evaluated"]
-            if candidate_programs:
-                # Use the new public sorting method from the selection controller
-                final_best_sorted = self.selection_controller.sort_programs(candidate_programs,
-                                                                            self.task_definition)  # Changed _v5
-                if final_best_sorted:
-                    best_overall_program = final_best_sorted[0]
-                    logger.info(
-                        f"Overall Best Program Found: ID={best_overall_program.id}, Code:\n{best_overall_program.code}\nFitness: {best_overall_program.fitness_scores}, Generation: {best_overall_program.generation}")
-                    return [best_overall_program]
-                else:
-                    logger.info("No evaluated programs left after filtering to sort.")
-            else:
-                logger.info("No evaluated programs found to determine an overall best.")
-        else:
-            logger.info("No programs found in the database at the end of evolution.")
-        return []
+        total_run_time_sec = time.monotonic() - self.start_time_overall_run
+
+        best_program_list = await self._get_overall_best_program()  # Helper that uses selection_controller.sort_programs
+        best_overall_program_obj = best_program_list[0] if best_program_list else None
+
+        total_api_calls_session = 0
+        if hasattr(self.code_generator, 'get_api_call_count_session'):
+            total_api_calls_session = self.code_generator.get_api_call_count_session()
+        logger.info(f"Total LLM API calls for this session: {total_api_calls_session}")
+
+        final_summary_payload = {
+            "best_program_overall": best_overall_program_obj,
+            "total_runtime_sec": round(total_run_time_sec, 2),
+            "task_id": self.task_definition.id,
+            "total_llm_api_calls_session": total_api_calls_session
+        }
+        # Also add this to the MonitoringAgent's final log if desired (e.g. to metrics file)
+        # For now, log_final_summary in MonitoringAgent primarily logs to console.
+        await self.monitoring_agent.execute("log_final_summary", payload=final_summary_payload)
+
+        return best_program_list
 
     async def generate_crossover_offspring(self, parent1: Program, parent2: Program, generation_num: int,
                                            child_id: str) -> Optional[Program]:  # v1.0.0

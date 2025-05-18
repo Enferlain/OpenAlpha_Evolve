@@ -1,4 +1,3 @@
-# Code Generator Agent 
 import google.generativeai as genai
 from typing import Optional, Dict, Any
 import logging
@@ -20,10 +19,12 @@ class CodeGeneratorAgent(CodeGeneratorInterface):
         genai.configure(api_key=settings.GEMINI_API_KEY)
         self.model_name = settings.GEMINI_PRO_MODEL_NAME # Default to pro, can be overridden by task
         self.generation_config = genai.types.GenerationConfig(
-            temperature=0.7, 
-            top_p=0.9,
+            temperature=1.0,
+            top_p=0.95,
             top_k=40
         )
+        self.api_call_count_session = 0 # Counter for the current session/run
+        self.api_call_count_generation = 0 # Counter for the current generation, to be reset
         logger.info(f"CodeGeneratorAgent initialized with model: {self.model_name}")
         # self.max_retries and self.retry_delay_seconds are not used from instance, settings are used directly
 
@@ -67,8 +68,15 @@ Make sure that the changes you propose are consistent with each other.
         for attempt in range(retries):
             try:
                 logger.debug(f"API Call Attempt {attempt + 1} of {retries} to {effective_model_name}.")
+                # >>> THIS IS THE ACTUAL API CALL <<<
                 response = await model_to_use.generate_content_async(prompt)
-                
+
+                # Increment counters AFTER the call attempt (whether it succeeds or fails with certain errors)
+                # Or, increment only on *successful* return if that's desired. Let's count attempts that reach the API endpoint.
+                self.api_call_count_session += 1
+                self.api_call_count_generation += 1
+                logger.debug(f"API call made. Generation count: {self.api_call_count_generation}, Session count: {self.api_call_count_session}")
+
                 if not response.candidates:
                     logger.warning("Gemini API returned no candidates.")
                     if response.prompt_feedback and response.prompt_feedback.block_reason:
@@ -102,6 +110,19 @@ Make sure that the changes you propose are consistent with each other.
         logger.error(f"Code generation failed for model {effective_model_name} after all retries.")
         return ""
 
+    def get_api_call_count_generation(self) -> int:  # Method_v1.0.0 (New)
+        """Returns the number of API calls made in the current generation."""
+        return self.api_call_count_generation
+
+    def reset_api_call_count_generation(self) -> None:  # Method_v1.0.0 (New)
+        """Resets the API call counter for the current generation."""
+        logger.debug(f"Resetting generation API call count from {self.api_call_count_generation} to 0.")
+        self.api_call_count_generation = 0
+
+    def get_api_call_count_session(self) -> int:  # Method_v1.0.0 (New)
+        """Returns the total number of API calls made in the current session."""
+        return self.api_call_count_session
+
     def _clean_llm_output(self, raw_code: str) -> str:
         """
         Cleans the raw output from the LLM, typically removing markdown code fences.
@@ -126,11 +147,11 @@ Make sure that the changes you propose are consistent with each other.
         """
         Applies a diff in the AlphaEvolve format to the parent code.
         Diff format:
-        <<<<<<< SEARCH
+        # <<<<<<< SEARCH
         # Original code block
         =======
         # New code block
-        >>>>>>> REPLACE
+        # >>>>>>> REPLACE
         """
         logger.info("Attempting to apply diff.")
         logger.debug(f"Parent code length: {len(parent_code)}")
@@ -196,133 +217,3 @@ Make sure that the changes you propose are consistent with each other.
                 return generated_output
         else: # "code"
             return generated_output
-
-# Example Usage (for testing this agent directly)
-if __name__ == '__main__':
-    import asyncio
-    logging.basicConfig(level=logging.DEBUG)
-    
-    async def test_diff_application():
-        agent = CodeGeneratorAgent()
-        parent = """Line 1
-Line 2 to be replaced
-Line 3
-Another block
-To be changed
-End of block
-Final line"""
-
-        diff = """Some preamble text from LLM...
-<<<<<<< SEARCH
-Line 2 to be replaced
-=======
-Line 2 has been successfully replaced
->>>>>>> REPLACE
-
-Some other text...
-
-<<<<<<< SEARCH
-Another block
-To be changed
-End of block
-=======
-This
-Entire
-Block
-Is New
->>>>>>> REPLACE
-Trailing text..."""
-        expected_output = """Line 1
-Line 2 has been successfully replaced
-Line 3
-This
-Entire
-Block
-Is New
-Final line"""
-        
-        print("--- Testing _apply_diff directly ---")
-        result = agent._apply_diff(parent, diff)
-        print("Result of diff application:")
-        print(result)
-        assert result.strip() == expected_output.strip(), f"Direct diff application failed.\nExpected:\n{expected_output}\nGot:\n{result}"
-        print("_apply_diff test passed.")
-
-        print("\n--- Testing execute with output_format='diff' ---")
-        async def mock_generate_code(prompt, model_name, temperature, output_format):
-            return diff
-        
-        agent.generate_code = mock_generate_code 
-        
-        result_execute_diff = await agent.execute(
-            prompt="doesn't matter for this mock", 
-            parent_code_for_diff=parent,
-            output_format="diff"
-        )
-        print("Result of execute with diff:")
-        print(result_execute_diff)
-        assert result_execute_diff.strip() == expected_output.strip(), f"Execute with diff failed.\nExpected:\n{expected_output}\nGot:\n{result_execute_diff}"
-        print("Execute with diff test passed.")
-
-
-    async def test_generation():
-        agent = CodeGeneratorAgent()
-        
-        test_prompt_full_code = "Write a Python function that takes two numbers and returns their sum."
-        generated_full_code = await agent.execute(test_prompt_full_code, temperature=0.6, output_format="code")
-        print("\n--- Generated Full Code (via execute) ---")
-        print(generated_full_code)
-        print("----------------------")
-        assert "def" in generated_full_code, "Full code generation seems to have failed."
-
-        parent_code_for_llm_diff = '''
-def greet(name):
-    return f"Hello, {name}!"
-
-def process_data(data):
-    # TODO: Implement data processing
-    return data * 2 # Simple placeholder
-'''
-        test_prompt_diff_gen = f'''
-Current code:
-```python
-{parent_code_for_llm_diff}
-```
-Task: Modify the `process_data` function to add 5 to the result instead of multiplying by 2.
-Also, change the greeting in `greet` to "Hi, {name}!!!".
-'''
-        # Commenting out live LLM call for automated testing in this context
-        # generated_diff_and_applied = await agent.execute(
-        #     prompt=test_prompt_diff_gen,
-        #     temperature=0.5,
-        #     output_format="diff",
-        #     parent_code_for_diff=parent_code_for_llm_diff
-        # )
-        # print("\n--- Generated Diff and Applied (Live LLM Call) ---")
-        # print(generated_diff_and_applied)
-        # print("----------------------")
-        # assert "data + 5" in generated_diff_and_applied, "LLM diff for process_data not applied as expected."
-        # assert "Hi, name!!!" in generated_diff_and_applied, "LLM diff for greet not applied as expected."
-        
-        async def mock_generate_empty_diff(prompt, model_name, temperature, output_format):
-            return "  \n  " 
-        
-        original_generate_code = agent.generate_code 
-        agent.generate_code = mock_generate_empty_diff
-        
-        print("\n--- Testing execute with empty diff from LLM ---")
-        result_empty_diff = await agent.execute(
-            prompt="doesn't matter",
-            parent_code_for_diff=parent_code_for_llm_diff,
-            output_format="diff"
-        )
-        assert result_empty_diff == parent_code_for_llm_diff, "Empty diff should return parent code."
-        print("Execute with empty diff test passed.")
-        agent.generate_code = original_generate_code
-
-    async def main_tests():
-        await test_diff_application()
-        # await test_generation() # Uncomment to run live LLM tests for generate_code
-        print("\nAll selected local tests in CodeGeneratorAgent passed.")
-
-    asyncio.run(main_tests())

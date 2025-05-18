@@ -13,9 +13,8 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
         logger.info(
             f"PromptDesignerAgent initialized for task: {self.task_definition.id} (Mode: {self.task_definition.improvement_mode})")  # Added mode to log_v2
 
-    def design_initial_prompt(self, task: TaskDefinition) -> str:  # Added task: TaskDefinition _v3        logger.info(f"Designing initial prompt for task: {self.task_definition.id}")
+    def design_initial_prompt(self, task: TaskDefinition) -> str:  # Added task: TaskDefinition _v3
         logger.info(f"Designing initial prompt for task: {task.id}")
-
         prompt = (
             f"You are an expert Python programmer. Your task is to write a Python function based on the following specifications.\n\n"
             f"Task Description: {task.description}\n\n"  # Use task.description
@@ -211,17 +210,19 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
         allowed_imports_section = f"Allowed Standard Library Imports: {task.allowed_imports}. Do not use other external libraries or packages.\n\n" # Use task, not self.task_definition here
 
         # --- Start of new logic for different improvement modes (v2) ---
-        if self.task_definition.improvement_mode == "general_refinement":
+        if task.improvement_mode == "general_refinement":  # After (using the passed 'task' object)
             logger.info(f"Crafting mutation prompt for 'general_refinement' mode.")
             improvement_goal_intro = "Your Improvement Goal (General Refinement):\n"
 
             directives_section = ""
-            if self.task_definition.specific_improvement_directives:
-                directives_section = f"Specific Directives: {self.task_definition.specific_improvement_directives}\n"
+            if task.specific_improvement_directives:  # After
+                # directives_section = f"Specific Directives: {self.task_definition.specific_improvement_directives}\n" # Before
+                directives_section = f"Specific Directives: {task.specific_improvement_directives}\n"  # After
 
             metrics_section = ""
-            if self.task_definition.primary_focus_metrics:
-                metrics_str = ", ".join(self.task_definition.primary_focus_metrics)
+            if task.primary_focus_metrics:  # After
+                # metrics_str = ", ".join(self.task_definition.primary_focus_metrics) # Before
+                metrics_str = ", ".join(task.primary_focus_metrics)  # After
                 metrics_section = f"Primary Focus Metrics: Aim to improve metrics such as {metrics_str}. (Note: Detailed scores for these may not be in current feedback but will be evaluated on your new version).\n"
             else:
                 metrics_section = "Primary Focus Metrics: Aim to improve general code quality (e.g., readability, maintainability, efficiency where applicable).\n"
