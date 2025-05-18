@@ -7,11 +7,14 @@ from dataclasses import dataclass, field
 class Program:
     id: str
     code: str
-    fitness_scores: Dict[str, float] = field(default_factory=dict) # e.g., {"correctness": 1.0, "runtime_ms": 50.0}
+    fitness_scores: Dict[str, float] = field(default_factory=dict)
     generation: int = 0
-    parent_id: Optional[str] = None
+    parent_id: Optional[str] = None # For mutation, could store one parent
+    parent_ids: Optional[List[str]] = None # For crossover, could store both parents!
     errors: List[str] = field(default_factory=list)
-    status: str = "unevaluated" # e.g., unevaluated, evaluating, evaluated, failed_evaluation
+    status: str = "unevaluated"
+    task_id: Optional[str] = None
+    creation_method: str = "unknown" # e.g., "initial", "mutation", "bug_fix", "crossover" <-- NEW!
 
 @dataclass
 class TaskDefinition:
@@ -75,6 +78,11 @@ class PromptDesignerInterface(BaseAgent):
 
     @abstractmethod
     def design_mutation_prompt(self, task: TaskDefinition, parent_program: Program, evaluation_feedback: Optional[Dict] = None) -> str: # Should be correct now
+        pass
+
+    @abstractmethod
+    def design_crossover_prompt(self, task: TaskDefinition, parent_program1: Program, parent_program2: Program) -> str: # <-- NEW!
+        """Designs a prompt to guide the LLM in combining two parent programs."""
         pass
 
     @abstractmethod

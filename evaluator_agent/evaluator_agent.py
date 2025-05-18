@@ -5,12 +5,13 @@ import subprocess
 import tempfile
 import os
 import ast
+import re
 import json
 import asyncio
 import sys
 from typing import Optional, Dict, Any, Tuple, Union, List
-import re # Already here for Pylint
-
+from pylint import lint # <--- NEW IMPORT!
+from pylint.reporters.text import TextReporter # For capturing output if needed, or use stats
 from core.interfaces import EvaluatorAgentInterface, Program, TaskDefinition, BaseAgent
 from config import settings
 
@@ -265,8 +266,8 @@ print(json.dumps(final_output, default=custom_json_serializer))
         correctness = passed_tests / total_tests
         return correctness, passed_tests, total_tests
 
-    async def _run_static_analysis_tool(self, tool_name: str, command: List[str], program_id: str,
-                                        temp_file_path: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    async def _run_static_analysis_tool(self, tool_name: str, command: List[str], program_id: str) -> Tuple[
+        Optional[Dict[str, Any]], Optional[str]]:
         """Helper function to run a static analysis tool and parse its JSON output."""
         logger.debug(f"Executing {tool_name} command: {' '.join(command)}")
         try:
@@ -310,16 +311,16 @@ print(json.dumps(final_output, default=custom_json_serializer))
             return None, f"{tool_name}: Analysis error - {type(e).__name__}"
 
     async def evaluate_program(self, program: Program,
-                               task: TaskDefinition) -> Program:  # Method_v3 (Radon Integration)
+                               task: TaskDefinition) -> Program:  # Method_v4 (Pylint as Library)
         logger.info(f"Evaluating program: {program.id} for task: {task.id} (Mode: {task.improvement_mode})")
         program.status = "evaluating"
         program.errors = []
         program.fitness_scores = {
             "correctness": 0.0,
             "runtime_ms": float('inf'),
-            "pylint_score": -1.0,
-            "cyclomatic_complexity_avg": float('inf'),  # Initialize new Radon metric (lower is better) _v3
-            "maintainability_index": -1.0  # Initialize new Radon metric (higher is better) _v3
+            "pylint_score": -10.0,  # Pylint scores are typically -10 to 10. Let's use a clear "not run" default.
+            "cyclomatic_complexity_avg": float('inf'),
+            "maintainability_index": -1.0
         }
 
         syntax_errors = self._check_syntax(program.code)
@@ -330,52 +331,88 @@ print(json.dumps(final_output, default=custom_json_serializer))
             return program
         logger.debug(f"Syntax check passed for program {program.id}.")
 
-        # --- Static Analysis Section (Pylint and Radon) ---
-        # Only run static analysis if in general_refinement or if metrics are explicitly requested
-        needs_pylint = "pylint_score" in (task.primary_focus_metrics or [])
-        needs_radon_cc = "cyclomatic_complexity_avg" in (task.primary_focus_metrics or [])
-        needs_radon_mi = "maintainability_index" in (task.primary_focus_metrics or [])
-
-        run_static_analysis = task.improvement_mode == "general_refinement" or \
-                              needs_pylint or needs_radon_cc or needs_radon_mi
-
-        temp_code_file_path = None  # Define here for broader scope in finally block
-        if run_static_analysis and program.code.strip():  # Only run on non-empty code
+        temp_code_file_path = None
+        if program.code.strip():  # Only run static analysis on non-empty code
             try:
+                # Create a temporary file for Pylint and Radon to analyze
+                # Using NamedTemporaryFile to ensure it has a path accessible by other tools (Radon)
                 with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmpf:
                     tmpf.write(program.code)
                     temp_code_file_path = tmpf.name
 
-                # Pylint Analysis ( reusing structure from _run_static_analysis_tool )
-                if task.improvement_mode == "general_refinement" or needs_pylint:
-                    logger.info(f"Running Pylint analysis for program {program.id}...")
-                    pylint_cmd = [sys.executable, "-m", "pylint", temp_code_file_path, "--output-format=text"]
-                    # Note: --rcfile behavior might differ on Windows, consider removing or adjusting.
-                    if sys.platform != "win32": pylint_cmd.insert(4, "--rcfile=/dev/null")
+                # --- Pylint Analysis (using Pylint as a library) ---
+                needs_pylint = "pylint_score" in (task.primary_focus_metrics or []) or \
+                               task.improvement_mode == "general_refinement"
 
-                    # Pylint doesn't have a straightforward JSON for just the score, parse text.
-                    process_pylint = await asyncio.to_thread(
-                        subprocess.run, pylint_cmd, capture_output=True, universal_newlines=True, timeout=60  # _v6
-                    )
-                    pylint_output = process_pylint.stdout
-                    if process_pylint.stderr and process_pylint.returncode != 0:
-                        logger.warning(f"Pylint stderr for {program.id}:\n{process_pylint.stderr}")
+                if needs_pylint:
+                    logger.info(f"Running Pylint analysis (as library) for program {program.id}...")
+                    try:
+                        # We'll run Pylint in a separate thread because it can be CPU-bound
+                        # and its internal workings might not be fully async-friendly.
+                        # Pylint's Run is a bit tricky with capturing stdout for detailed messages if needed,
+                        # but we mainly want the score from stats.
 
-                    score_match = re.search(r"Your code has been rated at (-?\d+\.?\d*)/10", pylint_output)
-                    if score_match:
-                        program.fitness_scores["pylint_score"] = float(score_match.group(1))
-                        logger.info(
-                            f"Pylint score for program {program.id}: {program.fitness_scores['pylint_score']}/10")
-                    else:
-                        logger.warning(f"Could not parse Pylint score for {program.id}. Output: {pylint_output[:500]}")
-                        program.errors.append("Pylint: Failed to parse score.")
+                        # This is a simplified way to capture the results
+                        # For more detailed message capture, a custom reporter might be needed.
+                        # However, linter.stats['global_note'] is usually reliable for the score.
+
+                        def run_pylint_in_thread(file_path):
+                            # pylint_opts = [file_path, '--output-format=text', '--rcfile=/dev/null' if sys.platform != "win32" else '']
+                            # Minimal options for score retrieval
+                            pylint_opts = [file_path]
+                            if sys.platform != "win32":  # Attempt to suppress default rcfile loading
+                                pylint_opts.append('--rcfile=/dev/null')
+                            else:  # On Windows, --rcfile=/dev/null causes issues.
+                                # We might need to provide a minimal rcfile or accept default behavior.
+                                # For now, let's try without --rcfile on Windows.
+                                # Or, provide a known minimal rcfile: pylint_opts.append('--rcfile=minimal_pylint.rc')
+                                pass  # Keep pylint_opts as just [file_path] on Windows if no better option
+
+                            # Filter out empty strings from pylint_opts if any were added as ''
+                            pylint_opts = [opt for opt in pylint_opts if opt]
+
+                            linter = lint.Run(pylint_opts, exit=False).linter
+                            # The linter object from lint.Run(..., exit=False) is what we need.
+                            # pylint.run.Run is deprecated, use lint.Run
+
+                            return linter.stats.get('global_note', None), linter.stats.get('statement',
+                                                                                           0)  # Get score and statement count
+
+                        pylint_score_val, pylint_statement_count = await asyncio.to_thread(run_pylint_in_thread,
+                                                                                           temp_code_file_path)
+
+                        if pylint_statement_count == 0 and not program.code.strip().startswith("def"):
+                            # If no statements were found by Pylint (e.g. empty file, or just comments)
+                            # and it's not clearly just a function definition (which might have 0 statements if it's just `pass`)
+                            # assign a neutral or low score.
+                            logger.info(
+                                f"Pylint found 0 statements for program {program.id}. Assigning Pylint score of 0.0.")
+                            program.fitness_scores["pylint_score"] = 0.0
+                        elif pylint_score_val is not None:
+                            program.fitness_scores["pylint_score"] = float(pylint_score_val)
+                            logger.info(
+                                f"Pylint score for program {program.id}: {program.fitness_scores['pylint_score']:.2f}/10")
+                        else:
+                            logger.warning(
+                                f"Could not retrieve Pylint score for {program.id} using library method. linter.stats.global_note was None.")
+                            program.errors.append("Pylint: Failed to retrieve score programmatically.")
+                            # Keep the default -10.0 to indicate an issue
+                    except Exception as e_pylint:
+                        logger.error(f"Error running Pylint as library for {program.id}: {e_pylint}", exc_info=True)
+                        program.errors.append(f"Pylint: Error during analysis - {type(e_pylint).__name__}")
+                        # Keep the default -10.0
+
+                # --- Radon Analysis (remains the same, uses subprocess) ---
+                needs_radon_cc = "cyclomatic_complexity_avg" in (task.primary_focus_metrics or []) or \
+                                 task.improvement_mode == "general_refinement"
+                needs_radon_mi = "maintainability_index" in (task.primary_focus_metrics or []) or \
+                                 task.improvement_mode == "general_refinement"
 
                 # Radon Analysis - Cyclomatic Complexity (using JSON output)
-                if task.improvement_mode == "general_refinement" or needs_radon_cc:
+                if needs_radon_cc:
                     logger.info(f"Running Radon CC analysis for program {program.id}...")
                     radon_cc_cmd = [sys.executable, "-m", "radon", "cc", "-j", temp_code_file_path]
-                    cc_data, cc_error = await self._run_static_analysis_tool("Radon CC", radon_cc_cmd, program.id,
-                                                                             temp_code_file_path)
+                    cc_data, cc_error = await self._run_static_analysis_tool("Radon CC", radon_cc_cmd, program.id)
                     if cc_error:
                         program.errors.append(cc_error)
                     elif cc_data and isinstance(cc_data, dict):  # Expecting a dict keyed by filename
@@ -408,11 +445,10 @@ print(json.dumps(final_output, default=custom_json_serializer))
                             program.fitness_scores["cyclomatic_complexity_avg"] = float('inf')  # Indicate error/unknown
 
                 # Radon Analysis - Maintainability Index (using JSON output)
-                if task.improvement_mode == "general_refinement" or needs_radon_mi:
+                if needs_radon_mi:
                     logger.info(f"Running Radon MI analysis for program {program.id}...")
                     radon_mi_cmd = [sys.executable, "-m", "radon", "mi", "-j", temp_code_file_path]
-                    mi_data, mi_error = await self._run_static_analysis_tool("Radon MI", radon_mi_cmd, program.id,
-                                                                             temp_code_file_path)
+                    mi_data, mi_error = await self._run_static_analysis_tool("Radon MI", radon_mi_cmd, program.id) # No temp_file_path here
                     if mi_error:
                         program.errors.append(mi_error)
                     elif mi_data and isinstance(mi_data, dict):

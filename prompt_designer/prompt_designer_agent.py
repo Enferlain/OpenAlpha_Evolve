@@ -34,6 +34,43 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
         logger.debug(f"Designed initial prompt:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
+    def design_crossover_prompt(self, task: TaskDefinition, parent_program1: Program, parent_program2: Program) -> str: # v1.0.0
+        logger.info(f"Designing crossover prompt for task: {task.id} using parents {parent_program1.id} and {parent_program2.id}")
+
+        # Helper to format parent info concisely
+        def format_parent_info(parent_prog: Program, number: int) -> str:
+            feedback_summary = self._format_evaluation_feedback(task, parent_prog, parent_prog.fitness_scores) # Use its own scores
+            return (
+                f"--- Parent {number} (ID: {parent_prog.id}, Gen: {parent_prog.generation}) ---\n"
+                f"Code:\n```python\n{parent_prog.code}\n```\n"
+                f"Evaluation Feedback for this Parent:\n{feedback_summary}\n"
+            )
+
+        parent1_info = format_parent_info(parent_program1, 1)
+        parent2_info = format_parent_info(parent_program2, 2)
+
+        prompt = (
+            f"You are an expert Python programmer specializing in synthesizing optimal solutions.\n"
+            f"Your task is to perform a 'genetic crossover' on two parent Python functions to create a new, potentially superior child function.\n\n"
+            f"Overall Task Description: {task.description}\n"
+            f"Function to Evolve: `{task.function_name_to_evolve}`\n"
+            f"Allowed Standard Library Imports: {task.allowed_imports}. Do not use any other external libraries or packages.\n\n"
+            f"{parent1_info}\n"
+            f"{parent2_info}\n"
+            f"--- Crossover Instructions ---\n"
+            f"Analyze both Parent 1 and Parent 2. Your goal is to create a NEW child function that:\n"
+            f"1. Solves the 'Overall Task Description' effectively.\n"
+            f"2. Combines the best features, logic, or approaches from *both* parent functions. For example, if one parent is more efficient in one part and the other is more robust in another, try to get the best of both.\n"
+            f"3. Learns from any weaknesses or errors mentioned in their respective 'Evaluation Feedback'.\n"
+            f"4. Adheres to the specified `function_name_to_evolve` and `allowed_imports`.\n\n"
+            f"Your Response Format:\n"
+            f"Provide *only* the complete Python code for the new child function. "
+            f"The code should be self-contained or rely only on the allowed imports. "
+            f"Do not include any surrounding text, explanations, comments outside the function, or markdown code fences (like ```python or ```)."
+        )
+        logger.debug(f"Designed crossover prompt:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
+        return prompt
+
     def _format_input_output_examples(self, task: TaskDefinition) -> str:  # Modified to accept task _v3
         if not task.input_output_examples:  # Use task.input_output_examples
             return "No input/output examples provided."
