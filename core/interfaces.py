@@ -77,7 +77,9 @@ class PromptDesignerInterface(BaseAgent):
         pass
 
     @abstractmethod
-    def design_mutation_prompt(self, task: TaskDefinition, parent_program: Program, evaluation_feedback: Optional[Dict] = None) -> str: # Should be correct now
+    def design_mutation_prompt(self, task: TaskDefinition, parent_program: Program,
+                               evaluation_feedback: Optional[Dict] = None,
+                               ancestral_summary: Optional[List[Dict[str, Any]]] = None) -> str: # Method_v2 (added ancestral_summary)
         pass
 
     @abstractmethod
@@ -86,9 +88,17 @@ class PromptDesignerInterface(BaseAgent):
         pass
 
     @abstractmethod
-    def design_bug_fix_prompt(self, task: TaskDefinition, program: Program, error_message: str, execution_output: Optional[str] = None) -> str: # MODIFIED _v5
+    def design_bug_fix_prompt(self, task: TaskDefinition, program: Program, error_message: str,
+                              execution_output: Optional[str] = None,
+                              ancestral_summary: Optional[List[Dict[str, Any]]] = None) -> str: # Method_v6 (added ancestral_summary)
         pass
 
+    @abstractmethod
+    def design_failed_diff_fallback_prompt(self, task: TaskDefinition, original_program: Program,
+                                           previous_attempt_summary: str,
+                                           ancestral_summary: Optional[List[Dict[str, Any]]] = None) -> str: # Method_v2 (added ancestral_summary)
+        """Designs a prompt to ask for full code after a diff attempt failed."""
+        pass
 
 class CodeGeneratorInterface(BaseAgent):
     @abstractmethod

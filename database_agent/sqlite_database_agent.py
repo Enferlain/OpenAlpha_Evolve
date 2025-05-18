@@ -293,9 +293,9 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
             self._execute_blocking_query,
             query,
             (task_id, generation_size),
-            fetch_one=True,
-            fetch_all=False,  # Explicitly provide default
-            commit=False  # Explicitly provide default
+            fetch_one=False,  # Correct
+            fetch_all=True,  # Correct
+            commit=False
         )
 
         programs = [self._program_from_row(row) for row in rows if row]
@@ -323,9 +323,9 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
         row = await asyncio.to_thread(
             self._execute_blocking_query,
             query,
-            params=(),
-            fetch_one=False,
-            fetch_all=True,
+            params,
+            fetch_one=True,
+            fetch_all=False,
             commit=False
         )
 
@@ -347,10 +347,10 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
         await asyncio.to_thread(
             self._execute_blocking_query,
             query,
-            params=(),
+            params,
             fetch_one=False,
-            fetch_all=True,
-            commit=False
+            fetch_all=False,
+            commit=True
         )
         logger.info(f"Programs cleared (Task ID: {task_id if task_id else 'All'}) from SQLite: {self.db_file}")
 

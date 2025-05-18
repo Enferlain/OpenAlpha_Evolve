@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import logging
 
 from core.interfaces import PromptDesignerInterface, Program, TaskDefinition, BaseAgent
@@ -156,13 +156,36 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
 
         return "Summary of the previous version's evaluation:\n" + "\n".join(feedback_parts)
 
-    def design_mutation_prompt(self, task: TaskDefinition, program: Program, evaluation_feedback: Optional[Dict[str, Any]] = None) -> str: # Added task: TaskDefinition _v3
-        logger.info(
-            f"Designing mutation prompt for program: {program.id} (Gen: {program.generation}, Mode: {self.task_definition.improvement_mode})")
-        logger.debug(f"Parent program code (to be mutated/improved):\n{program.code}")
+    def _format_ancestral_summary_for_prompt(self, ancestral_summary: Optional[
+        List[Dict[str, Any]]]) -> str:  # Method_v1.0.0 (New helper)
+        if not ancestral_summary:
+            return ""
 
-        feedback_summary = self._format_evaluation_feedback(task, program, evaluation_feedback) # Pass task here _v3
-        logger.debug(f"Formatted evaluation feedback for prompt:\n{feedback_summary}")
+        history_lines = []
+        for s in ancestral_summary:
+            # Example: "  - Gen 2 (mutation): Correctness: 80%, Pylint: 7.5/10"
+            history_lines.append(f"  - Gen {s['generation']} ({s['creation_method']}): {s['outcome_summary']}")
+
+        if not history_lines:
+            return ""
+
+        return (
+            "Brief History of Recent Ancestors (to consider and avoid repeating less successful paths):\n"
+            f"{chr(10).join(history_lines)}\n\n"  # chr(10) is newline
+        )
+
+    def design_mutation_prompt(self, task: TaskDefinition, parent_program: Program,
+                               evaluation_feedback: Optional[Dict[str, Any]] = None,
+                               ancestral_summary: Optional[
+                                   List[Dict[str, Any]]] = None) -> str:  # Method_v2 (added ancestral_summary)
+        logger.info(
+            f"Designing mutation prompt for program: {parent_program.id} (Gen: {parent_program.generation}, Mode: {task.improvement_mode})")
+        feedback_summary_str = self._format_evaluation_feedback(task, parent_program, evaluation_feedback)
+        historical_context_section = self._format_ancestral_summary_for_prompt(ancestral_summary)
+
+        logger.debug(f"Formatted evaluation feedback for prompt:\n{feedback_summary_str}")
+        if historical_context_section:
+            logger.debug(f"Ancestral summary for prompt:\n{historical_context_section}")
 
         # Standard diff instructions, applicable to both modes
         diff_instructions = (
@@ -179,14 +202,13 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             "- If you are deleting code, the REPLACE block should be empty."
             "- Provide all suggested changes as one or more such diff blocks. Do not include any other text, explanations, or markdown outside these blocks."
         )
-
-        prompt_header = f"You are an expert Python programmer. Your task is to improve an existing Python function based on its previous performance and the overall goal.\n\n"
+        prompt_header = f"You are an expert Python programmer. Your task is to improve an existing Python function based on its previous performance, historical attempts, and the overall goal.\n\n" # Added "historical attempts"
         current_code_section = (
-            f"Current Code (Version from Generation {program.generation}):\n"
-            f"```python\n{program.code}\n```\n\n"
-            f"Evaluation Feedback on the 'Current Code':\n{feedback_summary}\n\n"
+            f"Current Code (Version from Generation {parent_program.generation}):\n"
+            f"```python\n{parent_program.code}\n```\n\n"
+            f"Evaluation Feedback on the 'Current Code':\n{feedback_summary_str}\n\n"
         )
-        allowed_imports_section = f"Allowed Standard Library Imports: {self.task_definition.allowed_imports}. Do not use other external libraries or packages.\n\n"
+        allowed_imports_section = f"Allowed Standard Library Imports: {task.allowed_imports}. Do not use other external libraries or packages.\n\n" # Use task, not self.task_definition here
 
         # --- Start of new logic for different improvement modes (v2) ---
         if self.task_definition.improvement_mode == "general_refinement":
@@ -205,41 +227,43 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
                 metrics_section = "Primary Focus Metrics: Aim to improve general code quality (e.g., readability, maintainability, efficiency where applicable).\n"
 
             improvement_goal_details = (
-                f"Based on the 'Current Code' and its 'Evaluation Feedback', your goal is to propose modifications to refine and enhance this code. "
+                f"Based on the 'Current Code', its 'Evaluation Feedback', and the 'Brief History...', your goal is to propose modifications to refine and enhance this code. "
                 f"{directives_section}"
                 f"{metrics_section}"
                 f"If input/output examples were provided with the original task/seed, ensure your changes do not break existing functionality (treat I/O feedback as regression tests).\n\n"
             )
             prompt = (
-                    prompt_header +
-                    f"Overall Task Context (if any): {self.task_definition.description}\n\n" +  # Still provide overall context
-                    f"Function of Interest: `{self.task_definition.function_name_to_evolve}`\n\n" +
-                    allowed_imports_section +
-                    current_code_section +
-                    improvement_goal_intro +
-                    improvement_goal_details +
-                    diff_instructions
+                prompt_header +
+                f"Overall Task Context (if any): {task.description}\n\n" +
+                f"Function of Interest: `{task.function_name_to_evolve}`\n\n" +
+                allowed_imports_section +
+                current_code_section +
+                historical_context_section + # <-- Inserted history
+                improvement_goal_intro +
+                improvement_goal_details +
+                diff_instructions
             )
 
         else:  # Default to "task_focused" mode (original behavior with slight refinement)
             logger.info(f"Crafting mutation prompt for 'task_focused' mode.")
             improvement_goal_intro = "Your Improvement Goal (Task Focused):\n"
             improvement_goal_details = (
-                f"Based on the task, the 'Current Code', and its 'Evaluation Feedback', your goal is to propose modifications to improve the function `{self.task_definition.function_name_to_evolve}` "
-                f"to better solve the defined task: {self.task_definition.description}\n"
-                f"Prioritize fixing any errors or correctness issues related to the input/output examples. "
-                f"If correct, focus on improving efficiency or exploring alternative robust logic relevant to the task. "
-                f"Consider the original evaluation criteria: {self.task_definition.evaluation_criteria}\n\n"
+                f"Based on the task, the 'Current Code', its 'Evaluation Feedback', and the 'Brief History...', your goal is to propose modifications to improve the function `{task.function_name_to_evolve}` "
+                f"to better solve the defined task: {task.description}\n"
+                f"Prioritize fixing any errors or correctness issues."
+                f"If correct, focus on efficiency or alternative robust logic."
+                f"Consider the original evaluation criteria: {task.evaluation_criteria}\n\n"
             )
             prompt = (
-                    prompt_header +
-                    f"Overall Task Description: {self.task_definition.description}\n\n" +
-                    f"Function to Improve: `{self.task_definition.function_name_to_evolve}`\n\n" +
-                    allowed_imports_section +
-                    current_code_section +
-                    improvement_goal_intro +
-                    improvement_goal_details +
-                    diff_instructions
+                prompt_header +
+                f"Overall Task Description: {task.description}\n\n" +
+                f"Function to Improve: `{task.function_name_to_evolve}`\n\n" +
+                allowed_imports_section +
+                current_code_section +
+                historical_context_section + # <-- Inserted history
+                improvement_goal_intro +
+                improvement_goal_details +
+                diff_instructions
             )
         # --- End of new logic (v2) ---
 
@@ -247,13 +271,13 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             f"Designed mutation prompt (mode: {self.task_definition.improvement_mode}, requesting diff):\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
-    # MODIFIED SIGNATURE and usage of 'task' _v4 for this file
-    def design_bug_fix_prompt(self, task: TaskDefinition, program: Program, error_message: str, execution_output: Optional[str] = None) -> str:
-        logger.info(f"Designing bug-fix prompt for program: {program.id} (Gen: {program.generation}, Mode: {task.improvement_mode})") # Use task.improvement_mode
-        logger.debug(f"Buggy program code:\n{program.code}")
-        logger.debug(f"Primary error message: {error_message}")
-        if execution_output:
-            logger.debug(f"Additional execution output (stdout/stderr): {execution_output}")
+    def design_bug_fix_prompt(self, task: TaskDefinition, program: Program, error_message: str,
+                              execution_output: Optional[str] = None,
+                              ancestral_summary: Optional[List[Dict[str, Any]]] = None) -> str: # Method_v2 (added ancestral_summary)
+        logger.info(f"Designing bug-fix prompt for program: {program.id} (Gen: {program.generation}, Mode: {task.improvement_mode})")
+        historical_context_section = self._format_ancestral_summary_for_prompt(ancestral_summary)
+        if historical_context_section:
+            logger.debug(f"Ancestral summary for bug-fix prompt:\n{historical_context_section}")
 
         output_segment = f"Execution Output (stdout/stderr that might be relevant):\n{execution_output}\n" if execution_output else "No detailed execution output was captured beyond the error message itself.\n"
 
@@ -271,107 +295,50 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
         )
 
         prompt = (
-            f"You are an expert Python programmer. Your task is to fix a bug in an existing Python function.\n\n"
-            f"Overall Task Description: {task.description}\n\n" # Use task.description
-            f"Function to Fix: `{task.function_name_to_evolve}`\n\n" # Use task.function_name_to_evolve
-            f"Allowed Standard Library Imports: {task.allowed_imports}. Do not use other external libraries or packages.\n\n" # Use task.allowed_imports
+            f"You are an expert Python programmer. Your task is to fix a bug in an existing Python function, considering previous attempts.\n\n" # Added "considering previous attempts"
+            f"Overall Task Description: {task.description}\n"
+            f"Function to Fix: `{task.function_name_to_evolve}`\n"
+            f"Allowed Standard Library Imports: {task.allowed_imports}. Do not use other external libraries or packages.\n\n"
             f"Buggy Code (Version from Generation {program.generation}):\n"
             f"```python\n{program.code}\n```\n\n"
             f"Error Encountered: {error_message}\n"
-            f"{output_segment}\n"
+            f"{output_segment}"
+            f"{historical_context_section}" # <-- Inserted history
             f"Your Goal:\n"
-            f"Analyze the 'Buggy Code', the 'Error Encountered', and any 'Execution Output' to identify and fix the bug(s). "
+            f"Analyze the 'Buggy Code', 'Error Encountered', 'Execution Output', and the 'Brief History...' to identify and fix the bug(s). "
             f"The corrected function must adhere to the overall task description and allowed imports.\n\n"
             f"{diff_instructions}"
         )
         logger.debug(f"Designed bug-fix prompt (requesting diff):\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
+    def design_failed_diff_fallback_prompt(self, task: TaskDefinition, original_program: Program,
+                                           previous_attempt_summary: str,
+                                           ancestral_summary: Optional[List[Dict[str, Any]]] = None) -> str: # Method_v2 (added ancestral_summary)
+        logger.info(f"Designing failed-diff fallback prompt for program: {original_program.id} (Gen: {original_program.generation})")
+        historical_context_section = self._format_ancestral_summary_for_prompt(ancestral_summary)
+        if historical_context_section:
+            logger.debug(f"Ancestral summary for fallback prompt:\n{historical_context_section}")
+
+        prompt = (
+            f"You are an expert Python programmer. Your previous attempt to provide improvements for the following code via a diff format was unsuccessful or resulted in no changes.\n\n"
+            f"Overall Task Description: {task.description}\n"
+            f"Function of Interest: `{task.function_name_to_evolve}`\n"
+            f"Allowed Standard Library Imports: {task.allowed_imports}. Do not use any other external libraries or packages.\n\n"
+            f"Original Code (that was attempted to be diffed):\n"
+            f"```python\n{original_program.code}\n```\n\n"
+            f"Summary of Previous Attempt/Goal: {previous_attempt_summary}\n\n"
+            f"{historical_context_section}" # <-- Inserted history
+            f"Your New Goal:\n"
+            f"Please provide the *complete, fully corrected/improved version* of the function `{task.function_name_to_evolve}`. "
+            f"Ensure your new version addresses the objectives mentioned in the 'Summary of Previous Attempt/Goal' and learns from any 'Brief History...'.\n\n" # Added learns from history
+            f"Your Response Format:\n"
+            f"Provide *only* the complete Python code for the new version of the function `{task.function_name_to_evolve}`. "
+            f"The code should be self-contained or rely only on the allowed imports. "
+            f"Do not include any surrounding text, explanations, comments outside the function, or markdown code fences."
+        )
+        logger.debug(f"Designed failed-diff fallback prompt:\n{prompt}")
+        return prompt
+
     async def execute(self, *args, **kwargs) -> Any:
         raise NotImplementedError("PromptDesignerAgent.execute() is not the primary way to use this agent. Call specific design methods.")
-
-# Example Usage (if you want to test this agent's prompt generation directly)
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-
-    # --- Test Case 1: Task Focused (Original Behavior) ---
-    sample_task_def_focused = TaskDefinition(
-        id="task_focused_001",
-        description="Create a Python function `sum_list(numbers)` that returns the sum of a list of integers. Handle empty lists by returning 0.",
-        function_name_to_evolve="sum_list",
-        input_output_examples=[{"input": [1, 2, 3], "output": 6}, {"input": [], "output": 0}],
-        evaluation_criteria={"description": "Ensure correctness for all cases, including empty lists.", "target_metric": "correctness", "goal": "maximize"}, # _v3
-        allowed_imports=["math"],
-        improvement_mode="task_focused" # Explicitly set
-    )
-    designer_focused = PromptDesignerAgent(task_definition=sample_task_def_focused)
-    sample_program_focused = Program(
-        id="prog_focused_001",
-        code="def sum_list(numbers):\n  s = 0\n  for n in numbers:\n    s += n\n  return s if numbers else 1", # Bug for empty list
-        fitness_scores={"correctness": 0.5, "runtime_ms": 5.0}, # Before it was "correctness_score"
-        generation=1,
-        errors=["Test case failed: Input [], Expected 0, Got 1"],
-        status="evaluated"
-    )
-    mutation_feedback_focused = { # Simulating feedback from Evaluator
-        "correctness": sample_program_focused.fitness_scores["correctness"],
-        "runtime_ms": sample_program_focused.fitness_scores["runtime_ms"],
-        "errors": sample_program_focused.errors
-    }
-    print("\n--- Mutation Prompt (Task Focused Mode) ---")
-    mutation_prompt_focused = designer_focused.design_mutation_prompt(
-        sample_task_def_focused, # <--- ADDED THIS ARGUMENT
-        sample_program_focused,
-        evaluation_feedback=mutation_feedback_focused
-    )
-    print(mutation_prompt_focused)
-
-    # --- Test Case 2: General Refinement Mode ---
-    seed_code_general = """
-def complex_data_processor(data_list, factor, threshold):
-    # Some non-optimal code
-    results = []
-    for i in range(len(data_list)):
-        val = data_list[i]
-        if val > threshold:
-            processed_val = (val * factor) - (factor / 2)
-            if processed_val < 0: processed_val = 0 # floor at 0
-            results.append(processed_val)
-    return results
-"""
-    sample_task_def_general = TaskDefinition(
-        id="general_refine_001",
-        description="A script for processing data with some complex logic.", # General context
-        function_name_to_evolve="complex_data_processor",
-        initial_seed_code=seed_code_general, # Providing seed
-        improvement_mode="general_refinement", # THE NEW MODE!
-        primary_focus_metrics=["pylint_score", "cyclomatic_complexity", "readability_score"], # Hypothetical metrics
-        specific_improvement_directives="Try to make the main loop more Pythonic (e.g., list comprehensions if appropriate) and improve variable names for clarity. Also, add docstrings.",
-        allowed_imports=[],
-        # input_output_examples could still be provided for regression testing if desired
-        input_output_examples=[
-            {"input": ([10, 20, 5, 30], 2, 15), "output": [20.0, 40.0]} # Args as a tuple for the list
-        ],
-        evaluation_criteria={"description": "Maintain correctness based on I/O examples, if provided, while improving general code quality metrics.", "target_metric": "pylint_score", "goal": "maximize"}, # _v3 (example target)
-    )
-    designer_general = PromptDesignerAgent(task_definition=sample_task_def_general)
-    sample_program_general = Program(
-        id="prog_general_seed_001",
-        code=seed_code_general,
-        fitness_scores={"correctness": 1.0, "pylint_score": 6.5, "cyclomatic_complexity": 7}, # Example initial scores
-        generation=0,
-        status="evaluated"
-    )
-    mutation_feedback_general = { # Simulating feedback
-        "correctness": 1.0, # Passed I/O tests
-        "pylint_score": 6.5,
-        "cyclomatic_complexity": 7,
-        "errors": []
-    }
-    print("\n\n--- Mutation Prompt (General Refinement Mode) ---")
-    mutation_prompt_general = designer_general.design_mutation_prompt(
-        sample_task_def_general, # <--- ADDED THIS ARGUMENT
-        sample_program_general,
-        evaluation_feedback=mutation_feedback_general
-    )
-    print(mutation_prompt_general)

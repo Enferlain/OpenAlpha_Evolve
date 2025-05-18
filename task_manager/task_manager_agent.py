@@ -229,14 +229,6 @@ class TaskManagerAgent(TaskManagerInterface):
             )
             logger.info(f"Generation {gen}: New population size after survival: {len(current_population)}.")
 
-            current_population = self.selection_controller.select_survivors(
-                current_population,  # This is the population from the *previous* generation (could include elites)
-                offspring_population,  # These are the newly generated and evaluated offspring
-                self.population_size,
-                self.task_definition  # <--- ADDED THIS ARGUMENT
-            )
-            logger.info(f"Generation {gen}: New population size after survival: {len(current_population)}.")
-
             # Logging best program of the generation
             if current_population:
                 # Sort current_population by the same key used in selection to find the 'best'
@@ -322,14 +314,16 @@ class TaskManagerAgent(TaskManagerInterface):
         return offspring
 
     async def generate_offspring(self, parent: Program, generation_num: int, child_id: str) -> Optional[
-        Program]:  # Method_v2.1 (Completed)
+        Program]:  # Method_v4 (with Ancestral History and Diff Fallback)
         logger.debug(
             f"Generating mutation/bug_fix offspring {child_id} from parent {parent.id} for gen {generation_num}")
 
-        mutation_prompt_str: str = ""  # Initialize to ensure it's always a string
-        prompt_type: str = "mutation"  # Default creation method
+        # Fetch ancestral summary to pass to the prompt designer
+        ancestral_summary_for_prompt = await self._get_ancestral_summary_for_llm(parent,
+                                                                                 max_depth=3)  # Use the new helper
 
-        # Prepare evaluation feedback for the prompt designer, ensuring all relevant keys are present if possible
+        mutation_prompt_str: str = ""
+        prompt_type: str = "mutation"
         parent_feedback_cleaned = {
             "correctness": parent.fitness_scores.get("correctness"),
             "runtime_ms": parent.fitness_scores.get("runtime_ms"),
@@ -338,76 +332,75 @@ class TaskManagerAgent(TaskManagerInterface):
             "maintainability_index": parent.fitness_scores.get("maintainability_index"),
             "passed_tests": parent.fitness_scores.get("passed_tests"),
             "total_tests": parent.fitness_scores.get("total_tests"),
-            "errors": parent.errors,  # This is a list
+            "errors": parent.errors,
         }
-        # Clean out None values to keep the prompt tidy, but ensure 'errors' list is always there.
         parent_feedback_for_prompt = {k: v for k, v in parent_feedback_cleaned.items() if
                                       v is not None or k == "errors"}
+        original_attempt_summary_for_fallback = ""
 
-        # Decide if this should be a bug-fix attempt or a general mutation
-        # A common heuristic: if correctness is very low and there are errors, prioritize bug fixing.
-        # The threshold (e.g., 0.1 for correctness) can be a setting later if needed.
         if parent.errors and parent.fitness_scores.get("correctness", 1.0) < 0.1:
-            primary_error = parent.errors[0]  # Take the first error as the primary one for the prompt
-            # We don't have detailed execution_output readily available here unless EvaluatorAgent populates it
-            # into parent.errors in a structured way or another field. For now, pass None.
-            execution_details_for_prompt = None
-
-            logger.info(f"Designing bug-fix prompt for parent {parent.id}. Error: {primary_error}")
+            primary_error = parent.errors[0]
             mutation_prompt_str = self.prompt_designer.design_bug_fix_prompt(
-                task=self.task_definition,  # Pass the task definition
-                program=parent,
-                error_message=primary_error,
-                execution_output=execution_details_for_prompt  # This is often None
+                task=self.task_definition, program=parent, error_message=primary_error,
+                execution_output=None, ancestral_summary=ancestral_summary_for_prompt  # <-- Pass history
             )
             prompt_type = "bug_fix"
+            original_attempt_summary_for_fallback = f"Fix the bug causing error: '{primary_error}' in the provided code, considering the task: {self.task_definition.description}"
         else:
-            logger.info(
-                f"Designing mutation prompt for parent {parent.id} (Mode: {self.task_definition.improvement_mode}).")
             mutation_prompt_str = self.prompt_designer.design_mutation_prompt(
-                task=self.task_definition,  # Correct: This is the first parameter after self
-                parent_program=parent,  # <-- CORRECTED! Was 'program=parent'
-                evaluation_feedback=parent_feedback_for_prompt
+                task=self.task_definition, parent_program=parent,
+                evaluation_feedback=parent_feedback_for_prompt,
+                ancestral_summary=ancestral_summary_for_prompt  # <-- Pass history
             )
             prompt_type = "mutation"
+            original_attempt_summary_for_fallback = f"Improve the code based on its evaluation feedback and the general task: {self.task_definition.description}. Refinement mode: {self.task_definition.improvement_mode}."
 
-        # Generate code (or rather, a diff) using the designed prompt
-        # The CodeGeneratorAgent's execute method with output_format="diff" will attempt to apply the diff.
-        # The result, `final_code_after_diff`, will be the complete modified code if successful.
-        final_code_after_diff = await self.code_generator.execute(
-            prompt=mutation_prompt_str,
-            temperature=0.75,  # Could be a setting
-            output_format="diff",
-            parent_code_for_diff=parent.code
+        logger.info(f"Attempting {prompt_type} for offspring {child_id} using diff format.")
+        final_code = await self.code_generator.execute(
+            prompt=mutation_prompt_str, temperature=0.75, output_format="diff", parent_code_for_diff=parent.code
         )
 
-        # Check if the generation resulted in no change, empty code, or if the LLM returned the raw diff (error)
-        if not final_code_after_diff.strip():
+        diff_failed = False
+        if not final_code.strip() or final_code == parent.code:
+            diff_failed = True
             logger.warning(
-                f"Offspring generation for parent {parent.id} ({prompt_type}) resulted in EMPTY code. Skipping.")
-            return None
-        if final_code_after_diff == parent.code:
+                f"Diff attempt for offspring {child_id} ({prompt_type}) resulted in no change or empty code.")
+        elif "<<<<<<< SEARCH" in final_code and ">>>>>>> REPLACE" in final_code and len(final_code) < len(
+                parent.code) + 300:  # Increased heuristic length
+            diff_failed = True
             logger.warning(
-                f"Offspring generation for parent {parent.id} ({prompt_type}) resulted in NO CHANGE to the code. Skipping.")
-            return None
+                f"Diff attempt for {child_id} ({prompt_type}) seems to have returned raw diff text. Diff application likely failed.")
 
-        # A simple heuristic: if the CodeGeneratorAgent failed to apply the diff and returned the raw diff text
-        if "<<<<<<< SEARCH" in final_code_after_diff and ">>>>>>> REPLACE" in final_code_after_diff:
-            logger.warning(
-                f"Offspring generation for {parent.id} ({prompt_type}) returned raw diff text, indicating diff application likely failed or LLM didn't follow instructions. Diff text: {final_code_after_diff[:300]}... Skipping.")
-            return None
+        if diff_failed:
+            logger.info(f"Diff application failed for {child_id}. Attempting fallback to full code regeneration.")
+            creation_method_tag = prompt_type  # Store original attempt type
+            prompt_type += "_fallback_full"
+
+            fallback_prompt = self.prompt_designer.design_failed_diff_fallback_prompt(
+                task=self.task_definition, original_program=parent,
+                previous_attempt_summary=original_attempt_summary_for_fallback,
+                ancestral_summary=ancestral_summary_for_prompt  # <-- Pass history to fallback prompt too!
+            )
+
+            final_code = await self.code_generator.execute(
+                prompt=fallback_prompt, temperature=0.7, output_format="code"
+            )
+
+            if not final_code.strip():
+                logger.warning(f"Fallback full code generation for {child_id} also resulted in EMPTY code. Skipping.")
+                return None
+            if final_code == parent.code:
+                logger.warning(f"Fallback full code generation for {child_id} resulted in NO CHANGE. Skipping.")
+                return None
+            logger.info(
+                f"Successfully generated full code for {child_id} via fallback from original attempt '{creation_method_tag}'.")
 
         offspring = Program(
-            id=child_id,
-            code=final_code_after_diff,  # This is the modified code after diff application
-            generation=generation_num,
-            parent_id=parent.id,
-            parent_ids=[parent.id] if parent.id else [],  # For consistency with crossover, if we merge parent tracking
-            status="unevaluated",
-            task_id=self.task_definition.id,
-            creation_method=prompt_type
+            id=child_id, code=final_code, generation=generation_num, parent_id=parent.id,
+            parent_ids=[parent.id] if parent.id else [], status="unevaluated",
+            task_id=self.task_definition.id, creation_method=prompt_type
         )
-        logger.info(f"Successfully generated {prompt_type} offspring {offspring.id} from parent {parent.id}.")
+        logger.info(f"Successfully generated offspring {offspring.id} (Method: {prompt_type}).")
         return offspring
 
     async def _get_overall_best_program(self) -> List[Program]:  # Helper method extracted
@@ -433,6 +426,75 @@ class TaskManagerAgent(TaskManagerInterface):
         # For detailed display, could log code here or just return it.
         # logger.info(f"Code:\n{best_overall_program.code}")
         return [best_overall_program]
+
+    async def _get_ancestral_summary_for_llm(self, program: Program, max_depth: int = 3) -> List[
+        Dict[str, Any]]:  # Method_v1.0.0 (New helper for LLM history)
+        """
+        Retrieves a concise summary of a program's recent ancestors for LLM prompting.
+        Returns a list of dictionaries, with the oldest relevant ancestor first.
+        """
+        logger.debug(f"Fetching ancestral summary for program {program.id}, max_depth={max_depth}.")
+        history_summary = []
+        current_prog_in_history = program
+        # Keep track of processed IDs to prevent loops, though our linear parent_id shouldn't cause them.
+        processed_ids = {program.id}
+
+        for i in range(max_depth):
+            parent_ref_id = None
+            # For simplicity, we trace a single line of ancestry.
+            # If a program came from crossover, we'll pick the first parent listed in parent_ids.
+            if current_prog_in_history.parent_id:
+                parent_ref_id = current_prog_in_history.parent_id
+            elif current_prog_in_history.parent_ids and len(current_prog_in_history.parent_ids) > 0:
+                parent_ref_id = current_prog_in_history.parent_ids[0]
+
+            if not parent_ref_id or parent_ref_id in processed_ids:
+                logger.debug(
+                    f"Stopping ancestral search for {program.id}: no more valid parent_ref_id ({parent_ref_id}) or already processed.")
+                break
+
+            parent = await self.database.get_program(parent_ref_id)
+            if not parent:
+                logger.warning(
+                    f"Could not retrieve parent {parent_ref_id} for ancestral history of {program.id}. Stopping history trace here.")
+                break
+
+            processed_ids.add(parent.id)
+
+            # Create a concise summary for the LLM
+            outcome_parts = []
+            if parent.fitness_scores.get("correctness") is not None:
+                outcome_parts.append(f"Correctness: {parent.fitness_scores['correctness'] * 100:.0f}%")
+            if parent.fitness_scores.get("pylint_score") is not None:  # Assuming pylint_score is a float
+                p_score = parent.fitness_scores['pylint_score']
+                outcome_parts.append(
+                    f"Pylint: {p_score:.1f}/10" if isinstance(p_score, float) else f"Pylint: {p_score}")
+
+            error_summary_text = ""
+            if parent.errors:
+                first_error_str = str(parent.errors[0])
+                if "failed" in first_error_str.lower() and (
+                        "test" in first_error_str.lower() or "i/o" in first_error_str.lower()):
+                    error_summary_text = " (failed I/O)"
+                elif "syntax" in first_error_str.lower():
+                    error_summary_text = " (syntax err)"
+                else:
+                    error_summary_text = " (had errors)"
+
+            outcome_str = ', '.join(outcome_parts) + error_summary_text
+            if not outcome_str.strip():  # Ensure there's some text if no specific scores/errors
+                outcome_str = "Prior version."
+
+            summary_entry = {
+                "generation": parent.generation,
+                "creation_method": parent.creation_method if parent.creation_method != "unknown" else "prev_gen",
+                "outcome_summary": outcome_str
+            }
+            history_summary.append(summary_entry)
+            current_prog_in_history = parent  # Move to the parent for the next iteration
+
+        logger.debug(f"Returning {len(history_summary)} ancestral summaries for {program.id}.")
+        return list(reversed(history_summary))  # Oldest relevant ancestor first for readability in prompt
 
     async def execute(self) -> Any:
         return await self.manage_evolutionary_cycle()
