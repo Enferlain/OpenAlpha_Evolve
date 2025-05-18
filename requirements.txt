@@ -1,8 +1,10 @@
 # Core Libraries
-openai  # For openai compatible LLMs
+google-generativeai  # For Gemini LLMs
 # langchain
 # langchain-google-genai # Or similar for Gemini integration
 python-dotenv # For managing environment variables
+pylint
+radon
 
 # LLM Models & Frameworks
 # transformers

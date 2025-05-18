@@ -5,43 +5,29 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-FLASH_KEY = "FLASH"
-PRO_KEY = "PRO"
-EVALUATION_KEY = "EVALUATION"
-
-CUSTOM_PROVIDERS = {
-    PRO_KEY: {
-        "base_url": os.getenv("PRO_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-        "api_key": os.getenv("PRO_API_KEY"),
-        "model": os.getenv("PRO_MODEL", "models/gemini-2.0-flash")
-    },
-    FLASH_KEY: {
-        "base_url": os.getenv("FLASH_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-        "api_key": os.getenv("FLASH_API_KEY"),
-        "model": os.getenv("FLASH_MODEL", "models/gemini-2.0-flash")
-    },
-    EVALUATION_KEY: {
-        "base_url": os.getenv("EVALUATION_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-        "api_key": os.getenv("EVALUATION_API_KEY"),
-        "model": os.getenv("EVALUATION_MODEL", "models/gemini-2.0-flash")
-    }
-}
+# Attempt to load the API key
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Fallback for development if .env is not set or key is not found,
 # but ensure this is handled securely in production.
-# if not CUSTOM_PROVIDERS['GEMINI']['api_key']:
+if not GEMINI_API_KEY:
     # --- IMPORTANT ---
     # Directly embedding keys is a security risk.
     # This is a placeholder for local development ONLY.
     # In a real deployment, use environment variables, secrets management, or other secure methods.
     # For local testing without a .env file, you can temporarily set it like:
     # GEMINI_API_KEY = "YOUR_ACTUAL_API_KEY_HERE"
-    # print("Warning: GEMINI_API_KEY not found in .env or environment. Using a NON-FUNCTIONAL placeholder. Please create a .env file with your valid API key.")
-    # CUSTOM_PROVIDERS['GEMINI']['api_key'] = "YOUR_API_KEY_FROM_DOTENV_WAS_NOT_FOUND_PLEASE_SET_IT_UP" # Obvious placeholder
+    print("Warning: GEMINI_API_KEY not found in .env or environment. Using a NON-FUNCTIONAL placeholder. Please create a .env file with your valid API key.")
+    GEMINI_API_KEY = "YOUR_API_KEY_FROM_DOTENV_WAS_NOT_FOUND_PLEASE_SET_IT_UP" # Obvious placeholder
+
+# LLM Model Configuration
+GEMINI_PRO_MODEL_NAME = "gemini-2.5-flash-preview-04-17" #"gemini-2.0-flash-lite" # Using a more capable model
+GEMINI_FLASH_MODEL_NAME = "gemini-2.5-flash-preview-04-17" #"gemini-2.0-flash-lite" # Default model for speed
+GEMINI_EVALUATION_MODEL = "gemini-2.5-flash-preview-04-17" #"gemini-2.0-flash-lite" # Model for evaluation tasks
 
 # Evolutionary Parameters (examples)
-POPULATION_SIZE = 50  # Number of individuals in each generation
-GENERATIONS = 50       # Number of generations to run the evolution
+POPULATION_SIZE = 10  # Number of individuals in each generation
+GENERATIONS = 10       # Number of generations to run the evolution
 ELITISM_COUNT = 1     # Number of best individuals to carry over to the next generation
 MUTATION_RATE = 0.7   # Probability of mutating an individual
 CROSSOVER_RATE = 0.2  # Probability of crossing over two parents (if crossover is implemented)
@@ -82,9 +68,9 @@ def get_setting(key, default=None):
 # Example of how to get a model, perhaps with fallback logic (not strictly necessary with current direct assignments)
 def get_llm_model(model_type="pro"):
     if model_type == "pro":
-        return PRO_KEY
+        return GEMINI_PRO_MODEL_NAME
     elif model_type == "flash":
-        return FLASH_KEY
-    return FLASH_KEY # Default fallback
+        return GEMINI_FLASH_MODEL_NAME
+    return GEMINI_FLASH_MODEL_NAME # Default fallback
 
 # Add other global settings here 

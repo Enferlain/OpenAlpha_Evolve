@@ -6,7 +6,7 @@ import asyncio
 import logging
 import sys # Required for sys.maxsize in task definition
 
-from task_manager.agent import TaskManagerAgent
+from task_manager.task_manager_agent import TaskManagerAgent
 from core.interfaces import TaskDefinition
 # from config import settings # Not strictly needed here if TaskManagerAgent handles it
 
