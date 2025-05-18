@@ -12,20 +12,23 @@ import sys
 from typing import Optional, Dict, Any, Tuple, Union, List
 from pylint import lint # <--- NEW IMPORT!
 from pylint.reporters.text import TextReporter # For capturing output if needed, or use stats
-from core.interfaces import EvaluatorAgentInterface, Program, TaskDefinition, BaseAgent
+from core.interfaces import EvaluatorAgentInterface, Program, TaskDefinition # BaseAgent is inherited via EvaluatorAgentInterface
 from config import settings
 
 logger = logging.getLogger(__name__)
 
-class EvaluatorAgent(EvaluatorAgentInterface, BaseAgent):
+# To this (BaseAgent is inherited via EvaluatorAgentInterface):
+class EvaluatorAgent(EvaluatorAgentInterface):
     def __init__(self, task_definition: Optional[TaskDefinition] = None):
-        super().__init__()
+        # super().__init__() will correctly call BaseAgent.__init__ via the MRO
+        super().__init__(config=None) # Pass config=None, as EvaluatorAgent doesn't seem to use its own specific config dict
         self.task_definition = task_definition
         self.evaluation_model_name = settings.GEMINI_EVALUATION_MODEL
         self.evaluation_timeout_seconds = settings.EVALUATION_TIMEOUT_SECONDS
         logger.info(f"EvaluatorAgent initialized with model: {self.evaluation_model_name}, timeout: {self.evaluation_timeout_seconds}s")
         if self.task_definition:
             logger.info(f"EvaluatorAgent task_definition: {self.task_definition.id} (Mode: {self.task_definition.improvement_mode})")
+        logger.debug(f"EvaluatorAgent instance created. Task ID: {self.task_definition.id if self.task_definition else 'None'}")
 
     def _check_syntax(self, code: str) -> List[str]: # Unchanged
         errors = []
@@ -310,8 +313,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
             logger.error(f"Error during {tool_name} analysis for program {program_id}: {e}", exc_info=True)
             return None, f"{tool_name}: Analysis error - {type(e).__name__}"
 
-    async def evaluate_program(self, program: Program,
-                               task: TaskDefinition) -> Program:  # Method_v4 (Pylint as Library)
+    async def evaluate_program(self, program: Program, task: TaskDefinition) -> Program:  # Method_v4 (Pylint as Library)
         logger.info(f"Evaluating program: {program.id} for task: {task.id} (Mode: {task.improvement_mode})")
         program.status = "evaluating"
         program.errors = []
@@ -528,5 +530,28 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 f"Evaluation complete for program {program.id}. Status: {program.status}, Fitness: {program.fitness_scores}")
             return program
 
-        async def execute(self, program: Program, task: TaskDefinition) -> Program:  # Unchanged
-            return await self.evaluate_program(program, task)
+    # MODIFIED execute method:
+    async def execute(self, *args, **kwargs) -> Program:  # Signature changed to match BaseAgent
+        """
+        Generic execute method required by BaseAgent.
+        This implementation expects 'program' and 'task' in kwargs
+        and delegates to self.evaluate_program.
+        """
+        program_arg = kwargs.get("program")
+        task_arg = kwargs.get("task")
+
+        # Validate that we got the arguments we need to call evaluate_program
+        if not isinstance(program_arg, Program):
+            err_msg = f"EvaluatorAgent.execute expects 'program' of type Program in kwargs, but got {type(program_arg)}."
+            logger.error(err_msg)
+            raise TypeError(err_msg)
+
+        if not isinstance(task_arg, TaskDefinition):
+            err_msg = f"EvaluatorAgent.execute expects 'task' of type TaskDefinition in kwargs, but got {type(task_arg)}."
+            logger.error(err_msg)
+            raise TypeError(err_msg)
+
+        logger.debug(
+            f"EvaluatorAgent.execute is delegating to evaluate_program for program '{program_arg.id}', task '{task_arg.id}'")
+        # Now, call the main evaluation logic
+        return await self.evaluate_program(program_arg, task_arg)

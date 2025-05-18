@@ -191,24 +191,79 @@ class TaskManagerAgent(TaskManagerInterface):
 
     async def evaluate_population(self, population: List[Program]) -> List[Program]:
         logger.info(f"Evaluating population of {len(population)} programs.")
-        evaluated_programs = []
-        evaluation_tasks = [self.evaluator.evaluate_program(prog, self.task_definition) for prog in population if prog.status != "evaluated"]
-        
-        results = await asyncio.gather(*evaluation_tasks, return_exceptions=True)
-        
-        for i, result in enumerate(results):
-            original_program = population[i] # Assumes order is maintained
-            if isinstance(result, Exception):
-                logger.error(f"Error evaluating program {original_program.id}: {result}", exc_info=result)
-                original_program.status = "failed_evaluation"
-                original_program.errors.append(str(result))
-                evaluated_programs.append(original_program)
+        evaluated_programs_accumulator = []  # Renamed to avoid confusion with the input 'population'
+
+        # Create evaluation tasks only for programs that haven't been evaluated yet
+        # or need re-evaluation (though current logic doesn't explicitly re-evaluate)
+        evaluation_tasks = []
+        programs_to_evaluate_indices = []  # Keep track of original indices
+
+        for i, prog in enumerate(population):
+            if prog is not None and prog.status != "evaluated":  # Make sure prog isn't None here too
+                evaluation_tasks.append(self.evaluator.evaluate_program(prog, self.task_definition))
+                programs_to_evaluate_indices.append(i)
+            elif prog is not None:  # Already evaluated, just add it back
+                evaluated_programs_accumulator.append(prog)
+            # If prog is None initially, we skip it, it shouldn't be in the list.
+
+        if not evaluation_tasks:
+            logger.info("No programs in the provided list needed evaluation.")
+            # Ensure we return a list of Programs, even if some were None initially in the input
+            return [p for p in population if isinstance(p, Program)]
+
+            # --- This part processes results from asyncio.gather ---
+        results_from_gather = await asyncio.gather(*evaluation_tasks, return_exceptions=True)
+
+        # Create a temporary list for newly evaluated programs
+        newly_evaluated_or_failed_programs = []
+
+        for i, gather_result in enumerate(results_from_gather):
+            original_program_index = programs_to_evaluate_indices[i]  # Get the original index
+            program_being_processed = population[original_program_index]  # Get the Program object sent for evaluation
+
+            if isinstance(gather_result, Exception):
+                logger.error(f"Error evaluating program {program_being_processed.id}: {gather_result}",
+                             exc_info=gather_result)
+                program_being_processed.status = "failed_evaluation"
+                program_being_processed.errors.append(
+                    f"AsyncGather Exception: {type(gather_result).__name__} - {str(gather_result)}")
+                newly_evaluated_or_failed_programs.append(program_being_processed)
+            elif isinstance(gather_result, Program):  # Explicitly check if it's a Program object
+                newly_evaluated_or_failed_programs.append(gather_result)
             else:
-                evaluated_programs.append(result) # result is the evaluated Program object
-            await self.database.save_program(evaluated_programs[-1]) # Update DB with evaluation results
-            
-        logger.info(f"Finished evaluating population. {len(evaluated_programs)} programs processed.")
-        return evaluated_programs
+                # This case means evaluate_program returned something unexpected (like None)
+                # that wasn't an exception. This is the problem area.
+                logger.error(
+                    f"EvaluatorAgent.evaluate_program for program {program_being_processed.id} returned an unexpected type: {type(gather_result)}. Value: {gather_result}. Marking as failed.")
+                program_being_processed.status = "failed_evaluation_internal"  # A distinct status
+                program_being_processed.errors.append(f"Evaluator returned unexpected type: {type(gather_result)}")
+                newly_evaluated_or_failed_programs.append(
+                    program_being_processed)  # Add the original program in its failed state
+
+            # Save to database immediately after processing each result
+            program_to_save = newly_evaluated_or_failed_programs[-1]
+            if isinstance(program_to_save, Program):  # Ensure it's a Program before saving
+                await self.database.save_program(program_to_save)
+            else:
+                # This should ideally not be reached if the above logic is correct
+                logger.critical(
+                    f"Attempted to save a non-Program object ({type(program_to_save)}) to database. This indicates a logic flaw. Program ID was: {program_being_processed.id if program_being_processed else 'Unknown'}")
+
+        # Reconstruct the full list of programs in the original order if necessary,
+        # or simply combine already_evaluated with newly_evaluated.
+        # For simplicity, let's just combine. The order might change if that matters for selection.
+        # If order from input `population` must be strictly preserved, more complex merging is needed.
+
+        final_evaluated_population = []
+        # Add back programs that were already evaluated and skipped
+        for prog in population:
+            if prog is not None and prog.status == "evaluated" and prog not in newly_evaluated_or_failed_programs:  # Avoid duplicates if they were re-evaluated
+                final_evaluated_population.append(prog)
+
+        final_evaluated_population.extend(p for p in newly_evaluated_or_failed_programs if isinstance(p, Program))
+
+        logger.info(f"Finished evaluating. Total programs processed/retained: {len(final_evaluated_population)}.")
+        return final_evaluated_population
 
     async def manage_evolutionary_cycle(self) -> List[Program]:  # Method_v6 (with LLM Call Count Monitoring)
         logger.info(

@@ -54,7 +54,7 @@ class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
 
         # 3. Default tie-breakers (e.g., runtime if not a primary focus, then generation)
         if "runtime_ms" not in (task.primary_focus_metrics or []):  # If runtime wasn't primary
-            runtime = program.fitness_scores.get("runtime_ms", DEFAULT_METRIC_VALUE["runtime_ms"])
+            runtime = program.fitness_scores.get("runtime_ms", settings.DEFAULT_METRIC_VALUE["runtime_ms"])
             key_parts.append(-runtime)  # Lower is better, so -runtime for descending sort.
 
         key_parts.append(

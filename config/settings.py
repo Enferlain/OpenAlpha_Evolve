@@ -20,16 +20,16 @@ if not GEMINI_API_KEY:
     GEMINI_API_KEY = "YOUR_API_KEY_FROM_DOTENV_WAS_NOT_FOUND_PLEASE_SET_IT_UP" # Obvious placeholder
 
 # LLM Model Configuration
-GEMINI_PRO_MODEL_NAME = "gemini-2.5-flash-preview-04-17" #"gemini-2.0-flash-lite" # Using a more capable model
-GEMINI_FLASH_MODEL_NAME = "gemini-2.5-flash-preview-04-17" #"gemini-2.0-flash-lite" # Default model for speed
-GEMINI_EVALUATION_MODEL = "gemini-2.5-flash-preview-04-17" #"gemini-2.0-flash-lite" # Model for evaluation tasks
+GEMINI_PRO_MODEL_NAME = "gemini-2.0-flash-lite" # "gemini-2.5-flash-preview-04-17" # # Using a more capable model
+GEMINI_FLASH_MODEL_NAME = "gemini-2.0-flash-lite" # "gemini-2.5-flash-preview-04-17" #"gemini-2.0-flash-lite" # Default model for speed
+GEMINI_EVALUATION_MODEL = "gemini-2.0-flash-lite" # "gemini-2.5-flash-preview-04-17" #"gemini-2.0-flash-lite" # Model for evaluation tasks
 
 # Evolutionary Parameters (examples)
 POPULATION_SIZE = 10  # Number of individuals in each generation
-GENERATIONS = 10       # Number of generations to run the evolution
+GENERATIONS = 10      # Number of generations to run the evolution
 ELITISM_COUNT = 1     # Number of best individuals to carry over to the next generation
 MUTATION_RATE = 0.7   # Probability of mutating an individual
-CROSSOVER_RATE = 0.2  # Probability of crossing over two parents (if crossover is implemented)
+CROSSOVER_RATE = 0.2  # Probability of crossing over two parents
 
 # Evaluation settings
 EVALUATION_TIMEOUT_SECONDS = 800  # Max time for a program to run during evaluation
@@ -40,7 +40,7 @@ DATABASE_TYPE = "in_memory" # or "sqlite", "postgresql" in the future
 DATABASE_PATH = "alpha_evolve_programs.db" # After, to match SQLite agent default or desired .db name
 
 # Logging Parameters
-LOG_LEVEL = "INFO" # DEBUG, INFO, WARNING, ERROR, CRITICAL
+LOG_LEVEL = "DEBUG" # DEBUG, INFO, WARNING, ERROR, CRITICAL
 LOG_FILE = "alpha_evolve.log"
 
 # API Retry Parameters
