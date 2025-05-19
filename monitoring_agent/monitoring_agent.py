@@ -1,4 +1,3 @@
-# Version: 1.0.0 - Lumi's Observant Monitor!
 import logging
 import csv
 import json

@@ -1,4 +1,3 @@
-# Version: 1.0.0 - Lumi's Decisive SQLite Agent!
 import sqlite3
 import json
 import logging

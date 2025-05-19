@@ -28,7 +28,7 @@ MODEL_GEMINI_2_5_PRO_PREVIEW = "gemini-2.5-pro-preview-05-06" # Corrected name i
 # --- Select CURRENTLY Active Model for Code Generation ---
 # This is the model that CodeGeneratorAgent will use by default
 # and whose RPM limit TaskManagerAgent will primarily respect for its global semaphore.
-# GENERATION_MODEL_NAME = MODEL_GEMINI_2_5_FLASH_PREVIEW # Default to this one for now, Onii-chan can change it!
+# GENERATION_MODEL_NAME = MODEL_GEMINI_2_5_FLASH_PREVIEW # Default to this one for now
 GENERATION_MODEL_NAME = MODEL_GEMINI_2_0_FLASH_LITE # Or this one for more RPM
 
 # --- Model-Specific Free Tier RPM Limits ---

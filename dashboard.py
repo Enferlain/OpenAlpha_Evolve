@@ -7,14 +7,14 @@ import os
 DB_PATH = "alpha_evolve_programs.db"
 
 
-def load_program_data(task_id_filter=None):  # Method_v1.1.0 (Lumi's df initialization fix)
+def load_program_data(task_id_filter=None):  # Method_v1.1.0 (df initialization fix)
     """Loads program data from the SQLite database, optionally filtered by task_id."""
     if not os.path.exists(DB_PATH):
         st.info("Database file 'alpha_evolve_programs.db' not found. Has a run completed yet?")
         return pd.DataFrame()
 
     # Initialize df to an empty DataFrame before the try block
-    df = pd.DataFrame()  # <--- LUMI'S FIX! ✨ Initialize df here!
+    df = pd.DataFrame()
     conn = None  # Initialize conn to None as well for robust finally block
 
     try:

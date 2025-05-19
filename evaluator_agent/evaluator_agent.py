@@ -13,100 +13,139 @@ import io
 import sys
 from contextlib import redirect_stdout, redirect_stderr
 from typing import Optional, Dict, Any, Tuple, Union, List
-from pylint import lint # This one is likely already there
+from pylint import lint # Main Pylint entry point for Run
+from pylint.lint import PyLinter # For more direct control
+from pylint.reporters.text import TextReporter # We'll need a reporter
 from core.interfaces import EvaluatorAgentInterface, Program, TaskDefinition # BaseAgent is inherited via EvaluatorAgentInterface
 from config import settings
 
 logger = logging.getLogger(__name__)
 
 
-def run_pylint_in_thread(file_path: str) -> tuple[
-    Optional[float], int]:  # Method_v1.2.8 (Lumi's overgeneral_exceptions Fix)
+# Method_v1.3.7 ("Trust Pylint with RCFile" Attempt)
+def run_pylint_in_thread(file_path: str) -> tuple[Optional[float], int]:
+    temp_file_directory = os.path.dirname(file_path)
+    original_sys_path = list(sys.path)
+
+    current_script_path = os.path.abspath(__file__)
+    evaluator_agent_dir = os.path.dirname(current_script_path)
+    project_root = os.path.dirname(evaluator_agent_dir)
+    pylintrc_path = os.path.join(project_root, ".pylintrc")
+
+    logger.debug(f"run_pylint_in_thread: Determined absolute path for .pylintrc: {pylintrc_path}")
+
+    # --- Crucial Pylint Options ---
+    # These are options that configure Pylint's behavior or are essential for our use.
+    pylint_opts = [
+        file_path,  # The file to lint MUST come AFTER options for lint.Run
+        "--persistent=n",  # Disable caching of results
+        "--score=y",  # We definitely want the score output
+    ]
+
+    if os.path.exists(pylintrc_path):
+        pylint_opts.append(f"--rcfile={pylintrc_path}")
+        logger.info(f"Using .pylintrc: {pylintrc_path}")
+    else:
+        logger.warning(f"No .pylintrc found at {pylintrc_path}. Pylint will use defaults.")
+        # If no rcfile, we might need some basic default enables if Pylint doesn't run much by default.
+        # However, Pylint's default is to enable most things. Let's see.
+        # We could add: pylint_opts.append("--enable=C,R,W,E,F") here if needed.
+
+    # This was our specific fix for an overgeneral exceptions warning pattern.
+    # It's a direct command-line argument that Pylint understands.
+    pylint_opts.append("--overgeneral-exceptions=")
+
+    logger.debug(f"run_pylint_in_thread: Effective pylint_opts for lint.Run: {pylint_opts}")
+
+    captured_pylint_stdout = io.StringIO()  # For Pylint's actual report
+    captured_pylint_stderr = io.StringIO()  # For Pylint's own errors/warnings
+
+    linter_instance_from_run = None
+    score = None
+    statements = 0
 
     try:
-        logger.debug(
-            f"run_pylint_in_thread: Initializing PyLint for {file_path} with output redirection "
-            f"and explicit config options."
-        )
+        # Temporarily modify sys.path for Pylint to find the temp file as a module
+        if temp_file_directory not in sys.path:
+            sys.path.insert(0, temp_file_directory)
+            logger.debug(
+                f"run_pylint_in_thread: Added '{temp_file_directory}' to sys.path for Pylint module resolution.")
 
-        pylint_opts = [
-            file_path,
-            "--persistent=n",
-            "--disable=all",
-            "--enable=C,R,W,E,F",
-            "--score=y",
-            "--mixin-class-rgx=[a-z_][a-zA-Z0-9_]*[Mm]ixin",  # Kept this fix
-            "--overgeneral-exceptions="
-            # <--- ADD THIS! Empty string for default behavior (no specific overgeneral ones)
-            # Alternatively, you could list common ones like "Exception,BaseException"
-            # but empty is often safer for a general programmatic call.
-        ]
-        logger.debug(f"run_pylint_in_thread: Effective pylint_opts for lint.Run: {pylint_opts}")
-
-        captured_pylint_stdout = io.StringIO()
-        captured_pylint_stderr = io.StringIO()
-
-        linter = None
-
-        # The with statement for redirection should guard the lint.Run call
+        # Use redirect_stderr to catch Pylint's internal errors/warnings if it prints to stderr
+        # The TextReporter (default for lint.Run unless output-format is changed) writes to stdout.
         with redirect_stdout(captured_pylint_stdout), redirect_stderr(captured_pylint_stderr):
-            pylint_run_instance = lint.Run(pylint_opts, exit=False)
-            if hasattr(pylint_run_instance, 'linter') and pylint_run_instance.linter is not None:
-                linter = pylint_run_instance.linter
+            # lint.Run is the standard high-level way to invoke Pylint programmatically.
+            # It handles linter creation, config loading (rcfile + cmdline), checking, and reporting.
+            # The `exit=False` prevents it from calling sys.exit().
+            pylint_run = lint.Run(pylint_opts, exit=False)
+
+            # After Run completes, the linter instance it used should have stats
+            if hasattr(pylint_run, 'linter') and pylint_run.linter is not None:
+                linter_instance_from_run = pylint_run.linter
             else:
-                logger.error(f"Pylint lint.Run did not produce a valid linter object for {file_path}.")
-                # Log any output that occurred before this failure
-                pylint_stdout_val_err = captured_pylint_stdout.getvalue()
-                pylint_stderr_val_err = captured_pylint_stderr.getvalue()
-                if pylint_stdout_val_err.strip(): logger.debug(
-                    f"Pylint (pre-linter init) stdout: {pylint_stdout_val_err}")
-                if pylint_stderr_val_err.strip(): logger.warning(
-                    f"Pylint (pre-linter init) stderr: {pylint_stderr_val_err}")
-                return None, 0
+                logger.error("lint.Run did not produce a usable linter instance.")
+                # No need to restore sys.path here, finally block handles it.
+                return None, 0  # Cannot get score if linter is missing
 
-        # Log any captured output from Pylint (even if successful, for debugging)
-        pylint_stdout_val = captured_pylint_stdout.getvalue()
-        pylint_stderr_val = captured_pylint_stderr.getvalue()
-        if pylint_stdout_val.strip():
-            logger.debug(f"Pylint captured stdout for {file_path}:\n{pylint_stdout_val}")
-        if pylint_stderr_val.strip():
-            logger.warning(f"Pylint captured stderr for {file_path}:\n{pylint_stderr_val}")
+        # --- End of Pylint execution block ---
 
-        score = None
-        statements = 0
+        pylint_report_output = captured_pylint_stdout.getvalue()
+        pylint_error_output = captured_pylint_stderr.getvalue()
 
-        if linter and hasattr(linter, 'stats') and linter.stats is not None:
-            if hasattr(linter.stats, 'global_note'):
-                score = linter.stats.global_note
-            if hasattr(linter.stats, 'statement'):
-                statements = linter.stats.statement
+        if pylint_report_output.strip():
+            logger.debug(f"Pylint captured stdout (report) for {file_path}:\n{pylint_report_output}")
+        if pylint_error_output.strip():
+            # This is where we'd see the AttributeError if it still happens, or other Pylint errors.
+            logger.warning(f"Pylint captured stderr for {file_path}:\n{pylint_error_output}")
 
-            if score is None:
-                # Logging more details from stats if score is None
-                error_count = getattr(linter.stats, 'error', 'N/A')
-                warning_count = getattr(linter.stats, 'warning', 'N/A')
-                convention_count = getattr(linter.stats, 'convention', 'N/A')
-                refactor_count = getattr(linter.stats, 'refactor', 'N/A')
+        # Check stderr for the specific AttributeError or other critical errors
+        if "AttributeError: 'Namespace' object has no attribute 'mixin_class_rgx'" in pylint_error_output:
+            logger.critical(f"PERSISTENT AttributeError for mixin_class_rgx with file {file_path}!")
+            # This would indicate a very fundamental issue with how this Pylint version handles this rcfile option.
+        elif "fatal" in pylint_error_output.lower() or "astroid-error" in pylint_error_output.lower():
+            logger.error(f"Pylint reported a fatal/astroid error for {file_path}. Score might be unreliable.")
+            # Fall through to try and get score, but it will likely be 0 or low.
+
+        # Extract score and statements from the linter instance used by Run
+        if linter_instance_from_run and hasattr(linter_instance_from_run,
+                                                'stats') and linter_instance_from_run.stats is not None:
+            if hasattr(linter_instance_from_run.stats, 'global_note'):
+                score = linter_instance_from_run.stats.global_note
+            if hasattr(linter_instance_from_run.stats, 'statement'):
+                statements = linter_instance_from_run.stats.statement
+
+            if score is None and not (
+                    "fatal" in pylint_error_output.lower() or "astroid-error" in pylint_error_output.lower()):
+                # If score is None but no obvious Pylint crash, log details from stats
+                s = linter_instance_from_run.stats
                 logger.warning(
-                    f"Pylint global_note is None for {file_path} despite linter.stats existing. "
-                    f"Message counts: E={error_count}, W={warning_count}, C={convention_count}, R={refactor_count}. "
-                    f"Stats obj type: {type(linter.stats)}"
+                    f"Pylint global_note (score) is None for {file_path}. Stats: E={getattr(s, 'error', 'N/A')}, "
+                    f"W={getattr(s, 'warning', 'N/A')}, C={getattr(s, 'convention', 'N/A')}, R={getattr(s, 'refactor', 'N/A')}"
                 )
-        elif linter is None:  # Already handled by check after lint.Run
-            pass
-        else:
-            logger.error(
-                f"Pylint linter for {file_path} exists but lacks 'stats' or it's None. Pylint run may have failed to populate stats.")
+        elif score is None:  # Catch all if score is still None (e.g., due to earlier error or no stats)
+            logger.warning(
+                f"Pylint score is None for {file_path}. Check Pylint stderr for errors. Setting score to 0.0 if error occurred.")
+            if "fatal" in pylint_error_output.lower() or "astroid-error" in pylint_error_output.lower() or "AttributeError" in pylint_error_output:
+                score = 0.0
 
         logger.debug(f"Pylint run on {file_path} completed. Score: {score}, Statements: {statements}")
         return score, statements
 
-    except Exception as e_pylint_thread:
+    except Exception as e_pylint_thread:  # Catch any other unexpected exception during this process
         logger.error(
-            f"CRITICAL Exception INSIDE run_pylint_in_thread for file {file_path}: {e_pylint_thread}",
+            f"CRITICAL Exception in run_pylint_in_thread for file {file_path}: {e_pylint_thread}",
             exc_info=True
         )
+        # Log any captured output even on broader exception
+        stdout_on_exc = captured_pylint_stdout.getvalue()
+        stderr_on_exc = captured_pylint_stderr.getvalue()
+        if stdout_on_exc.strip(): logger.debug(f"Pylint stdout on broader exception: {stdout_on_exc}")
+        if stderr_on_exc.strip(): logger.error(f"Pylint stderr on broader exception: {stderr_on_exc}")
         return None, 0
+    finally:
+        # Crucial: Restore sys.path
+        sys.path = original_sys_path
+        logger.debug(f"run_pylint_in_thread: Restored original sys.path in finally block ({temp_file_directory}).")
 
 
 # To this (BaseAgent is inherited via EvaluatorAgentInterface):
@@ -465,71 +504,89 @@ print(json.dumps(final_output, default=custom_json_serializer))
             f"[_assess_correctness] Final assessment: Correctness={correctness:.2f} ({passed_tests}/{total_tests})")
         return correctness, passed_tests, total_tests
 
+    # Method_v1.1.2 (ANSI escape code stripping for Radon output)
     async def _run_static_analysis_tool(self, tool_name: str, command: List[str], program_id: str) -> \
-            Tuple[Optional[Dict[str, Any]], Optional[str]]:  # Method_v1.1.1 (Lumi's Radon stdout refinement)
+            Tuple[Optional[Dict[str, Any]], Optional[str]]:
 
         logger.debug(f"Executing {tool_name} command for program {program_id}: {' '.join(command)}")
         try:
             process = await asyncio.to_thread(
                 subprocess.run, command, capture_output=True, universal_newlines=True, timeout=60
             )
-            # Strip whitespace from stdout and stderr to handle empty lines or padding.
-            stdout = process.stdout.strip()
+
+            raw_stdout = process.stdout  # Get the raw stdout
             stderr = process.stderr.strip()
 
-            # Log stderr if present, especially if the process didn't "succeed" cleanly.
-            if stderr:  # Log stderr regardless of return code if it contains anything.
+            # Regex to remove ANSI escape codes
+            ansi_escape_pattern = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            stdout_cleaned_ansi = ansi_escape_pattern.sub('', raw_stdout)
+
+            # Now strip whitespace from the ANSI-cleaned string
+            stdout = stdout_cleaned_ansi.strip()
+
+            if stderr:
                 logger.warning(
                     f"{tool_name} produced stderr for {program_id} "
                     f"(return code {process.returncode}):\n{stderr}"
                 )
 
-            # Prioritize checking the return code. A non-zero return code indicates an error.
             if process.returncode != 0:
                 error_message = (
                     f"{tool_name} for program {program_id} failed with exit code {process.returncode}."
                 )
-                # Append stdout/stderr excerpts to the error message if they exist, for more context.
-                if stdout:
-                    error_message += f" Stdout excerpt: '{stdout[:200]}...'"
-                if stderr:  # Stderr already logged above, but can add to specific error msg too.
-                    error_message += f" Stderr excerpt: '{stderr[:200]}...'"
+                # Log the *original raw_stdout* if there's an error, before cleaning, to see everything
+                if raw_stdout.strip(): error_message += f" Raw Stdout excerpt: '{raw_stdout.strip()[:200]}...'"
+                if stderr: error_message += f" Stderr excerpt: '{stderr[:200]}...'"
                 logger.error(error_message)
-                return None, error_message  # Return None for data, and the error message.
+                return None, error_message
 
-            # If process succeeded (returncode 0):
-            # Check if stdout is empty or represents an empty JSON structure.
-            # This means the tool ran but found nothing to report in JSON format.
-            if not stdout or stdout == "{}" or stdout == "[]":
+            if not stdout:  # Check the cleaned and stripped stdout
                 logger.info(
-                    f"{tool_name} for program {program_id} succeeded but produced no significant JSON output "
-                    f"(stdout was: '{stdout}'). Assuming valid empty result or no findings."
+                    f"{tool_name} for program {program_id} succeeded but produced no significant output "
+                    f"(cleaned stdout was empty). Raw stdout was: '{raw_stdout[:200]}...'"
                 )
-                return {}, None  # Return an empty dictionary, indicating no data but no error.
+                return {}, None  # Return empty dict for no data, but no error
 
-            # If we have non-empty stdout, attempt to parse it as JSON.
-            logger.debug(f"{tool_name} stdout for {program_id} (to be parsed):\n{stdout[:1000]}...")
+            logger.debug(
+                f"Attempting json.loads on ANSI-cleaned and stripped stdout of length: {len(stdout)} for {program_id}")
+            if raw_stdout != stdout:  # Log if cleaning made a difference
+                logger.debug(f"Original raw stdout (first 200): {repr(raw_stdout[:200])}")
+                logger.debug(f"ANSI-cleaned stdout (first 200): {repr(stdout[:200])}")
             try:
-                parsed_json = json.loads(stdout)
-                return parsed_json, None  # Success, return parsed JSON and no error.
+                parsed_json = json.loads(stdout)  # Parse the cleaned string
+                return parsed_json, None
             except json.JSONDecodeError as e:
+                error_char_offset = e.pos
+                context_chars = 40  # Increased context
+
+                start_slice = max(0, error_char_offset - context_chars)
+                end_slice = min(len(stdout), error_char_offset + context_chars)
+                problematic_slice = stdout[start_slice:end_slice]
+
                 logger.error(
-                    f"Failed to decode {tool_name} JSON output for {program_id}: {e}. "
-                    f"Raw stdout: '{stdout[:500]}...'"
+                    f"Failed to decode {tool_name} JSON output for {program_id} AFTER ANSI cleaning: {e}. Error at char {error_char_offset}."
                 )
-                # Return None for data, and an error message about JSON decoding.
-                return None, f"{tool_name}: Failed to decode JSON output."
+                logger.error(f"  Cleaned stdout length: {len(stdout)}")
+                logger.error(
+                    f"  Problematic slice (from cleaned stdout, around char {error_char_offset}): >>>{repr(problematic_slice)}<<<")
+                logger.error(f"  Full cleaned stdout (first 500 chars): >>>{repr(stdout[:500])}<<<")
+                if len(stdout) > 500:
+                    logger.error(f"  Full cleaned stdout (last 500 chars): >>>{repr(stdout[-500:])}<<<")
+                # Also log the original raw stdout for comparison if error persists
+                logger.error(
+                    f"  Original raw stdout before any cleaning (first 500 chars): >>>{repr(raw_stdout[:500])}<<<")
+                return None, f"{tool_name}: Failed to decode JSON output even after ANSI cleaning."
 
         except subprocess.TimeoutExpired:
             logger.error(f"{tool_name} execution timed out for program {program_id}.")
             return None, f"{tool_name}: Execution timed out."
-        except FileNotFoundError:  # If the command (e.g., 'python' or 'radon') isn't found.
+        except FileNotFoundError:
             logger.error(
                 f"{tool_name} command not found (is it installed and in PATH?). "
                 f"Failed command: {' '.join(command)}"
             )
             return None, f"{tool_name}: Command not found. Is {tool_name} installed?"
-        except Exception as e:  # Catch any other unexpected errors during subprocess execution.
+        except Exception as e:
             logger.error(
                 f"Unexpected error during {tool_name} analysis for program {program_id}: {e}",
                 exc_info=True
@@ -744,7 +801,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
 
         logger.debug(
             f"[evaluate_program] FINALIZING for {program.id}. Status: {program.status}. Fitness: {program.fitness_scores}. Errors: {program.errors}. About to return program object.")
-        return program  # Crucially, always return the program object!
+        return program
 
     # MODIFIED execute method:
     async def execute(self, *args, **kwargs) -> Program:  # Signature changed to match BaseAgent

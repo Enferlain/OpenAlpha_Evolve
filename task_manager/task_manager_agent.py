@@ -72,7 +72,7 @@ class TaskManagerAgent(TaskManagerInterface):
 
         self.start_time_overall_run: Optional[float] = None
 
-    async def initialize_population(self) -> List[Program]:  # Method_v2.1.0 (Lumi's fix for creation_method)
+    async def initialize_population(self) -> List[Program]:  # Method_v2.1.0 (fix for creation_method)
         logger.info(
             f"Initializing population for task: {self.task_definition.id} (Mode: {self.task_definition.improvement_mode})")
         initial_population = []
@@ -89,7 +89,7 @@ class TaskManagerAgent(TaskManagerInterface):
                 generation=0,
                 status="unevaluated",
                 task_id=self.task_definition.id,  # Ensure task_id is set
-                creation_method="initial_seed"  # <--- LUMI'S FIX! ✨
+                creation_method="initial_seed"
             )
             initial_population.append(seed_program)
             # await self.database.save_program(seed_program) # Let's save all at the end or after evaluation
@@ -141,7 +141,7 @@ class TaskManagerAgent(TaskManagerInterface):
                     generation=0,
                     status="unevaluated",
                     task_id=self.task_definition.id,
-                    creation_method="initial_prompt"  # <--- LUMI'S FIX! ✨
+                    creation_method="initial_prompt"
                 )
                 initial_population.append(program)
                 # await self.database.save_program(program) # Let's save all at the end or after evaluation
