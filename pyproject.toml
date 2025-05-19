@@ -1,0 +1,36 @@
+# pyproject.toml
+
+[tool.ruff]
+# Top-level settings (non-linting configuration)
+line-length = 100
+
+# Moved select/ignore to the lint section as recommended
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "B",   # flake8-bugbear
+    "I",   # isort
+    "C4",  # flake8-comprehensions
+    "PL",  # pylint
+    "RUF", # ruff-specific rules
+]
+ignore = ["PLR0913"]  # Example: Ignore "too-many-arguments" (Pylint's R0913)
+
+# Pylint-specific settings remain in their section
+[tool.ruff.lint.pylint]
+max-args = 5  # Equivalent to Pylint's max-args
+
+# Per-file ignores remain unchanged
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # Example: ignore unused imports in __init__.py
+
+# Optional: Add these useful Ruff-specific settings
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+# Optional: Configure mccabe complexity checks (similar to Radon CC)
+[tool.ruff.lint.mccabe]
+max-complexity = 10
