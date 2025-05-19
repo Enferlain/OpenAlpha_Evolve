@@ -24,7 +24,7 @@ class EvaluatorAgent(EvaluatorAgentInterface):
         # super().__init__() will correctly call BaseAgent.__init__ via the MRO
         super().__init__(config=None) # Pass config=None, as EvaluatorAgent doesn't seem to use its own specific config dict
         self.task_definition = task_definition
-        self.evaluation_model_name = settings.GEMINI_EVALUATION_MODEL
+        self.evaluation_model_name = settings.EVALUATION_MODEL_NAME
         self.evaluation_timeout_seconds = settings.EVALUATION_TIMEOUT_SECONDS
         logger.info(f"EvaluatorAgent initialized with model: {self.evaluation_model_name}, timeout: {self.evaluation_timeout_seconds}s")
         if self.task_definition:

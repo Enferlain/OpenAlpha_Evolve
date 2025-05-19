@@ -72,9 +72,11 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
                 fitness_scores TEXT,
                 generation INTEGER NOT NULL,
                 parent_id TEXT,
+                parent_ids TEXT,
                 errors TEXT,
                 status TEXT NOT NULL,
-                task_id TEXT 
+                task_id TEXT,
+                creation_method TEXT
             )
         """
         # task_id is important for separating programs from different tasks!
@@ -95,13 +97,22 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
         """
         await self._create_table_if_not_exists_async()
 
-    def _program_from_row(self, row: sqlite3.Row) -> Optional[Program]:  # v1.0.0
-        """Converts a sqlite3.Row object to a Program object."""
+    def _program_from_row(self, row: sqlite3.Row) -> Optional[Program]:  # v1.0.0 (needs update)
         if not row:
             return None
         try:
             fitness_scores = json.loads(row["fitness_scores"]) if row["fitness_scores"] else {}
             errors = json.loads(row["errors"]) if row["errors"] else []
+
+            # --- NEW: Load parent_ids (JSON list) ---
+            parent_ids_list = None
+            if row["parent_ids"]:  # Check if the column exists and has data
+                try:
+                    parent_ids_list = json.loads(row["parent_ids"])
+                except json.JSONDecodeError:
+                    logger.warning(f"Could not parse parent_ids JSON for program {row['id']}: {row['parent_ids']}")
+                    parent_ids_list = None  # Or an empty list, depending on desired behavior
+            # --- END NEW ---
 
             return Program(
                 id=row["id"],
@@ -109,9 +120,12 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
                 fitness_scores=fitness_scores,
                 generation=row["generation"],
                 parent_id=row["parent_id"],
+                parent_ids=parent_ids_list,  # <-- Use the parsed list
                 errors=errors,
                 status=row["status"],
-                task_id=row["task_id"]
+                task_id=row["task_id"],
+                creation_method=row["creation_method"] if "creation_method" in row else "unknown"
+                # <-- Add this, with fallback
             )
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding JSON for program ID {row['id']} from {self.db_file}: {e}", exc_info=True)
@@ -136,11 +150,15 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
 
         fitness_scores_json = json.dumps(program.fitness_scores)
         errors_json = json.dumps(program.errors)
+        # --- NEW: Serialize parent_ids to JSON string ---
+        parent_ids_json = json.dumps(program.parent_ids) if program.parent_ids is not None else None
+        # --- END NEW ---
 
+        # --- UPDATED INSERT/REPLACE STATEMENT ---
         save_query = """
             INSERT OR REPLACE INTO programs 
-            (id, code, fitness_scores, generation, parent_id, errors, status, task_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, code, fitness_scores, generation, parent_id, parent_ids, errors, status, task_id, creation_method)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         params = (
             program.id,
@@ -148,9 +166,11 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
             fitness_scores_json,
             program.generation,
             program.parent_id,
+            parent_ids_json,         # <-- Add parent_ids_json
             errors_json,
             program.status,
-            program.task_id
+            program.task_id,
+            program.creation_method  # <-- Add creation_method
         )
         await asyncio.to_thread(
             self._execute_blocking_query,

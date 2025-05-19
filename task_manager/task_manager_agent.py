@@ -23,6 +23,23 @@ from monitoring_agent.monitoring_agent import MonitoringAgent # Import the concr
 
 logger = logging.getLogger(__name__)
 
+# --- Determine RPM and delay based on the currently selected settings.GENERATION_MODEL_NAME ---
+# Look up the RPM in our new dictionary from settings
+SELECTED_MODEL_FOR_GENERATION = settings.GENERATION_MODEL_NAME
+RPM_LIMIT = settings.MODEL_FREE_TIER_RPM.get(
+    SELECTED_MODEL_FOR_GENERATION,
+    settings.MODEL_FREE_TIER_RPM["default"] # Use the default fallback if model not found
+)
+
+MAX_CONCURRENT_API_CALLS = 1 # Still recommend 1 for simplicity with free tiers
+MIN_SECONDS_BETWEEN_CALLS = 60.0 / RPM_LIMIT if RPM_LIMIT > 0 else 6.0 # Default to 6s if RPM is 0/invalid (conservative)
+
+logger.info(
+    f"API Call Management for Model '{SELECTED_MODEL_FOR_GENERATION}': "
+    f"RPM_LIMIT={RPM_LIMIT}, MAX_CONCURRENT_API_CALLS={MAX_CONCURRENT_API_CALLS}, "
+    f"MIN_SECONDS_BETWEEN_CALLS={MIN_SECONDS_BETWEEN_CALLS:.2f}s"
+)
+
 
 class TaskManagerAgent(TaskManagerInterface):
     def __init__(self, task_definition: TaskDefinition, config: Optional[Dict[str, Any]] = None):
@@ -39,11 +56,21 @@ class TaskManagerAgent(TaskManagerInterface):
         self.crossover_rate = settings.CROSSOVER_RATE # e.g., 0.2 from settings
         self.min_parents_for_crossover = 2 # Typically 2
 
+        self._api_call_semaphore = asyncio.Semaphore(MAX_CONCURRENT_API_CALLS)
+        self._last_api_call_release_time = 0.0 # Initialize as float
+
         self.population_size = settings.POPULATION_SIZE
         self.num_generations = settings.GENERATIONS
+        # Calculate num_parents_to_select after potential CLI overrides to population_size
+        # This should ideally be done just before starting the evolutionary cycle or passed around.
+        # For now, this existing logic is fine as CLI overrides happen in main.py before TaskManager init.
         self.num_parents_to_select = self.population_size // 2
+        if self.num_parents_to_select < settings.ELITISM_COUNT and self.population_size >= settings.ELITISM_COUNT:
+            self.num_parents_to_select = settings.ELITISM_COUNT # Ensure enough parents for elitism if pop allows
+        elif self.num_parents_to_select == 0 and self.population_size > 0:
+             self.num_parents_to_select = 1 # Need at least one parent if population exists
 
-        self.start_time_overall_run: Optional[float] = None  # For total run time
+        self.start_time_overall_run: Optional[float] = None
 
     async def initialize_population(self) -> List[Program]:  # Method_v2
         logger.info(

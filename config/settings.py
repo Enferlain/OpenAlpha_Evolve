@@ -20,9 +20,34 @@ if not GEMINI_API_KEY:
     GEMINI_API_KEY = "YOUR_API_KEY_FROM_DOTENV_WAS_NOT_FOUND_PLEASE_SET_IT_UP" # Obvious placeholder
 
 # LLM Model Configuration
-GEMINI_PRO_MODEL_NAME = "gemini-2.0-flash-lite" # "gemini-2.5-flash-preview-04-17" # # Using a more capable model
-GEMINI_FLASH_MODEL_NAME = "gemini-2.0-flash-lite" # "gemini-2.5-flash-preview-04-17" #"gemini-2.0-flash-lite" # Default model for speed
-GEMINI_EVALUATION_MODEL = "gemini-2.0-flash-lite" # "gemini-2.5-flash-preview-04-17" #"gemini-2.0-flash-lite" # Model for evaluation tasks
+MODEL_GEMINI_2_0_FLASH_LITE = "gemini-2.0-flash-lite" # Alias for gemini-2.0-flash-lite-001
+MODEL_GEMINI_2_0_FLASH = "gemini-2.0-flash"           # Alias for gemini-2.0-flash-001
+MODEL_GEMINI_2_5_FLASH_PREVIEW = "gemini-2.5-flash-preview-04-17"
+MODEL_GEMINI_2_5_PRO_PREVIEW = "gemini-2.5-pro-preview-05-06" # Corrected name if it's 05-06
+
+# --- Select CURRENTLY Active Model for Code Generation ---
+# This is the model that CodeGeneratorAgent will use by default
+# and whose RPM limit TaskManagerAgent will primarily respect for its global semaphore.
+# GENERATION_MODEL_NAME = MODEL_GEMINI_2_5_FLASH_PREVIEW # Default to this one for now, Onii-chan can change it!
+GENERATION_MODEL_NAME = MODEL_GEMINI_2_0_FLASH_LITE # Or this one for more RPM
+
+# --- Model-Specific Free Tier RPM Limits ---
+# (Requests Per Minute for the free tier)
+MODEL_FREE_TIER_RPM = {
+    MODEL_GEMINI_2_0_FLASH_LITE: 30,
+    MODEL_GEMINI_2_0_FLASH: 15,
+    MODEL_GEMINI_2_5_FLASH_PREVIEW: 10,
+    MODEL_GEMINI_2_5_PRO_PREVIEW: 5,
+    # Add any other models and their RPMs here if needed
+    # Fallback RPM if model not listed (be conservative)
+    "default": 5
+}
+
+# --- Other LLM Model Configuration ---
+# GEMINI_FLASH_MODEL_NAME was used before, maybe consolidate or use for a different purpose?
+# For now, let's assume GEMINI_PRO_MODEL_NAME is the main one for generation.
+# EVALUATION_LLM_MODEL_NAME could be different if needed for specific eval tasks by an LLM.
+EVALUATION_MODEL_NAME = MODEL_GEMINI_2_5_FLASH_PREVIEW # Example
 
 # Evolutionary Parameters (examples)
 POPULATION_SIZE = 10  # Number of individuals in each generation
@@ -66,20 +91,25 @@ MONITORING_DASHBOARD_URL = "http://localhost:8080" # Example
 # --- Helper function to get a specific setting ---
 def get_setting(key, default=None):
     """
-    Retrieves a setting value.
-    For LLM models, it specifically checks if the primary choice is available,
-    otherwise falls back to a secondary/default if defined.
+    Retrieves a setting value from this module's global scope.
     """
-    # Prioritize environment variables for some settings if needed
-    # For example: return os.getenv(key, globals().get(key, default))
     return globals().get(key, default)
 
-# Example of how to get a model, perhaps with fallback logic (not strictly necessary with current direct assignments)
-def get_llm_model(model_type="pro"):
-    if model_type == "pro":
-        return GEMINI_PRO_MODEL_NAME
-    elif model_type == "flash":
-        return GEMINI_FLASH_MODEL_NAME
-    return GEMINI_FLASH_MODEL_NAME # Default fallback
+# --- Updated/Simplified get_llm_model function ---
+def get_generation_model() -> str:
+    """
+    Returns the currently configured primary model name for code generation.
+    """
+    return GENERATION_MODEL_NAME
 
-# Add other global settings here 
+def get_evaluation_model() -> str:
+    """
+    Returns the currently configured model name for LLM-based evaluation tasks.
+    """
+    return EVALUATION_MODEL_NAME
+
+# You can add more specific getters if needed, e.g.,
+# def get_model_rpm(model_name: str) -> int:
+#     return MODEL_FREE_TIER_RPM.get(model_name, MODEL_FREE_TIER_RPM["default"])
+
+# Add other global settings here

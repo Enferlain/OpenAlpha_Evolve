@@ -17,7 +17,7 @@ class CodeGeneratorAgent(CodeGeneratorInterface):
         if not settings.GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY not found in settings. Please set it in your .env file or config.")
         genai.configure(api_key=settings.GEMINI_API_KEY)
-        self.model_name = settings.GEMINI_PRO_MODEL_NAME # Default to pro, can be overridden by task
+        self.model_name = settings.GENERATION_MODEL_NAME # Default to pro, can be overridden by task
         self.generation_config = genai.types.GenerationConfig(
             temperature=1.0,
             top_p=0.95,
