@@ -1,55 +1,65 @@
 import streamlit as st
 import sqlite3
-import pandas as pd  # Keep this
+import pandas as pd
 import json
 import os
 
 DB_PATH = "alpha_evolve_programs.db"
 
 
-def load_program_data(task_id_filter=None):
+def load_program_data(task_id_filter=None):  # Method_v1.1.0 (Lumi's df initialization fix)
     """Loads program data from the SQLite database, optionally filtered by task_id."""
     if not os.path.exists(DB_PATH):
         st.info("Database file 'alpha_evolve_programs.db' not found. Has a run completed yet?")
         return pd.DataFrame()
 
-    conn = sqlite3.connect(DB_PATH)
-    query = "SELECT id, generation, creation_method, parent_id, parent_ids, fitness_scores, errors, code, task_id FROM programs"  # Added parent_id, parent_ids
-    if task_id_filter:
-        # Use parameterized query to prevent SQL injection, though less critical for local trusted input
-        query += " WHERE task_id = ?"
-        params = (task_id_filter,)
-    else:
-        params = ()
+    # Initialize df to an empty DataFrame before the try block
+    df = pd.DataFrame()  # <--- LUMI'S FIX! ✨ Initialize df here!
+    conn = None  # Initialize conn to None as well for robust finally block
 
     try:
-        # Pass params to read_sql_query if they exist
-        df = pd.read_sql_query(query, conn, params=params if params else None)
+        conn = sqlite3.connect(DB_PATH)  # Connection opened here
+        query = "SELECT id, generation, creation_method, parent_id, parent_ids, fitness_scores, errors, code, task_id FROM programs"
+        if task_id_filter:
+            query += " WHERE task_id = ?"
+            params = (task_id_filter,)
+        else:
+            params = ()
+
+        df = pd.read_sql_query(query, conn, params=params if params else None)  # df is assigned here
+
     except Exception as e:  # Catch a more general Exception from pandas or sqlite3
         st.error(f"Error reading from database (table 'programs' might be missing or schema is incorrect): {e}")
         st.info(
             "Please ensure an evolutionary run has completed successfully to create/populate the database with the correct schema.")
-        # We should still close the connection if it was opened
-        conn.close()
-        return pd.DataFrame()  # Return empty dataframe on error
+        # df remains an empty DataFrame if an error occurs here, which is fine for subsequent logic.
+        # The connection will be closed in the finally block.
+        # We can return the empty df here if we want to stop processing, or let it flow to parsing logic.
+        # For consistency, let's return here as other error paths do.
+        if conn:  # Close connection if it was successfully opened before exception
+            try:
+                conn.close()
+            except Exception as e_close:
+                st.warning(f"Ignoring error during connection close in except block: {e_close}")
+        return pd.DataFrame()  # Explicitly return an empty DataFrame on error
+
     finally:
-        # Ensure connection is closed if it was opened and no error occurred before this.
-        # If an error occurred and conn.close() was already called, this is fine.
-        # A more robust way is to use `with sqlite3.connect(DB_PATH) as conn:` if not using pandas directly for connection.
-        # However, pandas usually handles connection management for read_sql_query if given a path,
-        # but here we're managing it manually.
-        if 'conn' in locals() and conn:  # Check if conn was defined and potentially still open
+        # This finally block ensures the connection is closed if it was opened.
+        if conn:  # Only try to close if 'conn' was successfully assigned (i.e., sqlite3.connect succeeded)
             try:
                 # Check if connection is still active before trying to close
-                # This is a bit of a heuristic as sqlite3 connections don't have a direct 'is_closed'
-                conn.execute("SELECT 1")  # Try a simple command
+                # This can be tricky with sqlite3's Python API. A simple conn.close() is usually sufficient.
+                # The conn.execute("SELECT 1") was a heuristic and might cause issues if conn is already closed.
                 conn.close()
+                # logger.debug("Database connection closed in finally block.") # If you had a logger
             except sqlite3.ProgrammingError:  # Connection already closed or unusable
+                # st.warning("Attempted to close an already closed or unusable connection.") # Optional warning
                 pass
-            except Exception:  # Other potential errors on close
-                pass
+            except Exception as e_close_finally:  # Other potential errors on close
+                st.warning(f"Error closing database connection in finally block: {e_close_finally}")
 
     # Parse JSON strings in fitness_scores and add key metrics as columns
+    # df will be the result of read_sql_query if successful, or an empty DataFrame if not.
     if not df.empty and 'fitness_scores' in df.columns:
         parsed_scores = []
         for score_str in df['fitness_scores']:
@@ -62,27 +72,26 @@ def load_program_data(task_id_filter=None):
         df['correctness'] = score_df.get('correctness', pd.Series(0.0, index=df.index)) * 100
         df['runtime_ms'] = score_df.get('runtime_ms', pd.Series(float('inf'), index=df.index))
         df['pylint_score'] = score_df.get('pylint_score', pd.Series(-10.0, index=df.index))
-        # Add more parsed metrics as needed
-    elif not df.empty:  # df exists but no fitness_scores column (schema issue?)
+    elif not df.empty:
         st.warning("Column 'fitness_scores' not found in the loaded program data. Cannot parse detailed scores.")
-        # Initialize to prevent errors later if these columns are expected
         df['correctness'] = pd.Series(dtype='float64')
         df['runtime_ms'] = pd.Series(dtype='float64')
         df['pylint_score'] = pd.Series(dtype='float64')
-    else:  # df is empty, initialize columns
+    else:  # df is empty (either from DB_PATH not existing, read error, or genuinely no data)
+        # Initialize columns for an empty DataFrame to prevent downstream errors if these columns are expected
         df['correctness'] = pd.Series(dtype='float64')
         df['runtime_ms'] = pd.Series(dtype='float64')
         df['pylint_score'] = pd.Series(dtype='float64')
+        # Ensure parent_ids_display is also initialized for empty df
+        df['parent_ids_display'] = pd.Series(dtype='object')
 
-    # Handle parent_ids parsing if you want to display it cleanly
     if not df.empty and 'parent_ids' in df.columns:
-        # This column contains JSON strings of lists, e.g., "[\"parent1_id\", \"parent2_id\"]" or "null"
-        # You might want to display it as a comma-separated string or similar.
         df['parent_ids_display'] = df['parent_ids'].apply(
             lambda x: ', '.join(json.loads(x)) if x and x != 'null' else None
         )
-    elif not df.empty:
+    elif not df.empty and 'parent_ids_display' not in df.columns:  # If df is not empty but column is missing
         df['parent_ids_display'] = pd.Series(dtype='object')
+    # If df is empty, parent_ids_display was already initialized above.
 
     return df
 

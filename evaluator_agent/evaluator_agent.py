@@ -9,14 +9,105 @@ import copy
 import re
 import json
 import asyncio
+import io
 import sys
+from contextlib import redirect_stdout, redirect_stderr
 from typing import Optional, Dict, Any, Tuple, Union, List
-from pylint import lint # <--- NEW IMPORT!
-from pylint.reporters.text import TextReporter # For capturing output if needed, or use stats
+from pylint import lint # This one is likely already there
 from core.interfaces import EvaluatorAgentInterface, Program, TaskDefinition # BaseAgent is inherited via EvaluatorAgentInterface
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def run_pylint_in_thread(file_path: str) -> tuple[
+    Optional[float], int]:  # Method_v1.2.8 (Lumi's overgeneral_exceptions Fix)
+
+    try:
+        logger.debug(
+            f"run_pylint_in_thread: Initializing PyLint for {file_path} with output redirection "
+            f"and explicit config options."
+        )
+
+        pylint_opts = [
+            file_path,
+            "--persistent=n",
+            "--disable=all",
+            "--enable=C,R,W,E,F",
+            "--score=y",
+            "--mixin-class-rgx=[a-z_][a-zA-Z0-9_]*[Mm]ixin",  # Kept this fix
+            "--overgeneral-exceptions="
+            # <--- ADD THIS! Empty string for default behavior (no specific overgeneral ones)
+            # Alternatively, you could list common ones like "Exception,BaseException"
+            # but empty is often safer for a general programmatic call.
+        ]
+        logger.debug(f"run_pylint_in_thread: Effective pylint_opts for lint.Run: {pylint_opts}")
+
+        captured_pylint_stdout = io.StringIO()
+        captured_pylint_stderr = io.StringIO()
+
+        linter = None
+
+        # The with statement for redirection should guard the lint.Run call
+        with redirect_stdout(captured_pylint_stdout), redirect_stderr(captured_pylint_stderr):
+            pylint_run_instance = lint.Run(pylint_opts, exit=False)
+            if hasattr(pylint_run_instance, 'linter') and pylint_run_instance.linter is not None:
+                linter = pylint_run_instance.linter
+            else:
+                logger.error(f"Pylint lint.Run did not produce a valid linter object for {file_path}.")
+                # Log any output that occurred before this failure
+                pylint_stdout_val_err = captured_pylint_stdout.getvalue()
+                pylint_stderr_val_err = captured_pylint_stderr.getvalue()
+                if pylint_stdout_val_err.strip(): logger.debug(
+                    f"Pylint (pre-linter init) stdout: {pylint_stdout_val_err}")
+                if pylint_stderr_val_err.strip(): logger.warning(
+                    f"Pylint (pre-linter init) stderr: {pylint_stderr_val_err}")
+                return None, 0
+
+        # Log any captured output from Pylint (even if successful, for debugging)
+        pylint_stdout_val = captured_pylint_stdout.getvalue()
+        pylint_stderr_val = captured_pylint_stderr.getvalue()
+        if pylint_stdout_val.strip():
+            logger.debug(f"Pylint captured stdout for {file_path}:\n{pylint_stdout_val}")
+        if pylint_stderr_val.strip():
+            logger.warning(f"Pylint captured stderr for {file_path}:\n{pylint_stderr_val}")
+
+        score = None
+        statements = 0
+
+        if linter and hasattr(linter, 'stats') and linter.stats is not None:
+            if hasattr(linter.stats, 'global_note'):
+                score = linter.stats.global_note
+            if hasattr(linter.stats, 'statement'):
+                statements = linter.stats.statement
+
+            if score is None:
+                # Logging more details from stats if score is None
+                error_count = getattr(linter.stats, 'error', 'N/A')
+                warning_count = getattr(linter.stats, 'warning', 'N/A')
+                convention_count = getattr(linter.stats, 'convention', 'N/A')
+                refactor_count = getattr(linter.stats, 'refactor', 'N/A')
+                logger.warning(
+                    f"Pylint global_note is None for {file_path} despite linter.stats existing. "
+                    f"Message counts: E={error_count}, W={warning_count}, C={convention_count}, R={refactor_count}. "
+                    f"Stats obj type: {type(linter.stats)}"
+                )
+        elif linter is None:  # Already handled by check after lint.Run
+            pass
+        else:
+            logger.error(
+                f"Pylint linter for {file_path} exists but lacks 'stats' or it's None. Pylint run may have failed to populate stats.")
+
+        logger.debug(f"Pylint run on {file_path} completed. Score: {score}, Statements: {statements}")
+        return score, statements
+
+    except Exception as e_pylint_thread:
+        logger.error(
+            f"CRITICAL Exception INSIDE run_pylint_in_thread for file {file_path}: {e_pylint_thread}",
+            exc_info=True
+        )
+        return None, 0
+
 
 # To this (BaseAgent is inherited via EvaluatorAgentInterface):
 class EvaluatorAgent(EvaluatorAgentInterface):
@@ -247,7 +338,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 logger.warning(f"[_execute_code_safely] {error_message}")
                 logger.debug(f"[_execute_code_safely] Returning: (None, '{error_message}') due to non-zero exit code.")
                 return None, error_message
-            
+
             if not stdout_str:
                  error_message = f"No output from script. Stderr: '{stderr_str}'"
                  logger.warning(f"[_execute_code_safely] {error_message}")
@@ -374,49 +465,76 @@ print(json.dumps(final_output, default=custom_json_serializer))
             f"[_assess_correctness] Final assessment: Correctness={correctness:.2f} ({passed_tests}/{total_tests})")
         return correctness, passed_tests, total_tests
 
-    async def _run_static_analysis_tool(self, tool_name: str, command: List[str], program_id: str) -> Tuple[
-        Optional[Dict[str, Any]], Optional[str]]:
-        """Helper function to run a static analysis tool and parse its JSON output."""
-        logger.debug(f"Executing {tool_name} command: {' '.join(command)}")
+    async def _run_static_analysis_tool(self, tool_name: str, command: List[str], program_id: str) -> \
+            Tuple[Optional[Dict[str, Any]], Optional[str]]:  # Method_v1.1.1 (Lumi's Radon stdout refinement)
+
+        logger.debug(f"Executing {tool_name} command for program {program_id}: {' '.join(command)}")
         try:
             process = await asyncio.to_thread(
                 subprocess.run, command, capture_output=True, universal_newlines=True, timeout=60
-                # Changed text to universal_newlines_v6
             )
-            stdout = process.stdout
-            stderr = process.stderr
+            # Strip whitespace from stdout and stderr to handle empty lines or padding.
+            stdout = process.stdout.strip()
+            stderr = process.stderr.strip()
 
-            if stderr and process.returncode != 0:  # Some tools might print warnings to stderr but still succeed
-                logger.warning(f"{tool_name} stderr for {program_id} (return code {process.returncode}):\n{stderr}")
-            if not stdout and process.returncode != 0:  # If no stdout and error, it's a problem
-                logger.error(
-                    f"{tool_name} for {program_id} produced no output and failed (code {process.returncode}). Stderr: {stderr}")
-                return None, f"{tool_name}: No output and failed (code {process.returncode})."
-            if not stdout:  # No output but success code, maybe an empty file or no issues found by some specific radon command.
+            # Log stderr if present, especially if the process didn't "succeed" cleanly.
+            if stderr:  # Log stderr regardless of return code if it contains anything.
+                logger.warning(
+                    f"{tool_name} produced stderr for {program_id} "
+                    f"(return code {process.returncode}):\n{stderr}"
+                )
+
+            # Prioritize checking the return code. A non-zero return code indicates an error.
+            if process.returncode != 0:
+                error_message = (
+                    f"{tool_name} for program {program_id} failed with exit code {process.returncode}."
+                )
+                # Append stdout/stderr excerpts to the error message if they exist, for more context.
+                if stdout:
+                    error_message += f" Stdout excerpt: '{stdout[:200]}...'"
+                if stderr:  # Stderr already logged above, but can add to specific error msg too.
+                    error_message += f" Stderr excerpt: '{stderr[:200]}...'"
+                logger.error(error_message)
+                return None, error_message  # Return None for data, and the error message.
+
+            # If process succeeded (returncode 0):
+            # Check if stdout is empty or represents an empty JSON structure.
+            # This means the tool ran but found nothing to report in JSON format.
+            if not stdout or stdout == "{}" or stdout == "[]":
                 logger.info(
-                    f"{tool_name} for {program_id} produced no stdout, but exited successfully. Assuming valid empty result.")
-                return {}, None  # Return empty dict for successful no-output scenario
+                    f"{tool_name} for program {program_id} succeeded but produced no significant JSON output "
+                    f"(stdout was: '{stdout}'). Assuming valid empty result or no findings."
+                )
+                return {}, None  # Return an empty dictionary, indicating no data but no error.
 
-            logger.debug(f"{tool_name} stdout for {program_id}:\n{stdout[:1000]}...")
-
-            # Attempt to parse JSON output
+            # If we have non-empty stdout, attempt to parse it as JSON.
+            logger.debug(f"{tool_name} stdout for {program_id} (to be parsed):\n{stdout[:1000]}...")
             try:
                 parsed_json = json.loads(stdout)
-                return parsed_json, None
+                return parsed_json, None  # Success, return parsed JSON and no error.
             except json.JSONDecodeError as e:
                 logger.error(
-                    f"Failed to decode {tool_name} JSON output for {program_id}: {e}. Raw output: '{stdout[:500]}'")
+                    f"Failed to decode {tool_name} JSON output for {program_id}: {e}. "
+                    f"Raw stdout: '{stdout[:500]}...'"
+                )
+                # Return None for data, and an error message about JSON decoding.
                 return None, f"{tool_name}: Failed to decode JSON output."
 
         except subprocess.TimeoutExpired:
             logger.error(f"{tool_name} execution timed out for program {program_id}.")
             return None, f"{tool_name}: Execution timed out."
-        except FileNotFoundError:
-            logger.error(f"{tool_name} command not found. Make sure {tool_name} is installed and in PATH.")
+        except FileNotFoundError:  # If the command (e.g., 'python' or 'radon') isn't found.
+            logger.error(
+                f"{tool_name} command not found (is it installed and in PATH?). "
+                f"Failed command: {' '.join(command)}"
+            )
             return None, f"{tool_name}: Command not found. Is {tool_name} installed?"
-        except Exception as e:
-            logger.error(f"Error during {tool_name} analysis for program {program_id}: {e}", exc_info=True)
-            return None, f"{tool_name}: Analysis error - {type(e).__name__}"
+        except Exception as e:  # Catch any other unexpected errors during subprocess execution.
+            logger.error(
+                f"Unexpected error during {tool_name} analysis for program {program_id}: {e}",
+                exc_info=True
+            )
+            return None, f"{tool_name}: Unspecified analysis error - {type(e).__name__}"
 
     async def evaluate_program(self, program: Program, task: TaskDefinition) -> Program:
         logger.debug(
@@ -452,53 +570,26 @@ print(json.dumps(final_output, default=custom_json_serializer))
         if program.code.strip():
             logger.debug(f"[evaluate_program] Proceeding with static analysis for {program.id}")
             try:
-                # Create a temporary file for Pylint and Radon to analyze
-                # Using NamedTemporaryFile to ensure it has a path accessible by other tools (Radon)
                 with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmpf:
                     tmpf.write(program.code)
                     temp_code_file_path = tmpf.name
                 logger.debug(f"[evaluate_program] Temp code file for static analysis: {temp_code_file_path}")
 
-                # --- Pylint Analysis (using Pylint as a library) ---
                 needs_pylint = "pylint_score" in (task.primary_focus_metrics or []) or \
                                task.improvement_mode == "general_refinement"
 
                 if needs_pylint:
                     logger.info(f"Running Pylint analysis (as library) for program {program.id}...")
                     try:
-                        # We'll run Pylint in a separate thread because it can be CPU-bound
-                        # and its internal workings might not be fully async-friendly.
-                        # Pylint's Run is a bit tricky with capturing stdout for detailed messages if needed,
-                        # but we mainly want the score from stats.
+                        # REMOVE THE NESTED DEFINITION OF run_pylint_in_thread HERE! ✨
+                        # No more: def run_pylint_in_thread(file_path): ...
 
-                        # This is a simplified way to capture the results
-                        # For more detailed message capture, a custom reporter might be needed.
-                        # However, linter.stats['global_note'] is usually reliable for the score.
-
-                        def run_pylint_in_thread(file_path):
-                            # pylint_opts = [file_path, '--output-format=text', '--rcfile=/dev/null' if sys.platform != "win32" else '']
-                            # Minimal options for score retrieval
-                            pylint_opts = [file_path]
-                            if sys.platform != "win32":  # Attempt to suppress default rcfile loading
-                                pylint_opts.append('--rcfile=/dev/null')
-                            else:  # On Windows, --rcfile=/dev/null causes issues.
-                                # We might need to provide a minimal rcfile or accept default behavior.
-                                # For now, let's try without --rcfile on Windows.
-                                # Or, provide a known minimal rcfile: pylint_opts.append('--rcfile=minimal_pylint.rc')
-                                pass  # Keep pylint_opts as just [file_path] on Windows if no better option
-
-                            # Filter out empty strings from pylint_opts if any were added as ''
-                            pylint_opts = [opt for opt in pylint_opts if opt]
-
-                            linter = lint.Run(pylint_opts, exit=False).linter
-                            # The linter object from lint.Run(..., exit=False) is what we need.
-                            # pylint.run.Run is deprecated, use lint.Run
-
-                            return linter.stats.get('global_note', None), linter.stats.get('statement',
-                                                                                           0)  # Get score and statement count
-
-                        pylint_score_val, pylint_statement_count = await asyncio.to_thread(run_pylint_in_thread,
-                                                                                           temp_code_file_path)
+                        # This call will now use the top-level/module-level run_pylint_in_thread
+                        # which contains our fixes (Method_v1.2.2).
+                        pylint_score_val, pylint_statement_count = await asyncio.to_thread(
+                            run_pylint_in_thread, # Correctly refers to the outer/fixed version
+                            temp_code_file_path
+                        )
 
                         if pylint_statement_count == 0 and not program.code.strip().startswith("def"):
                             # If no statements were found by Pylint (e.g. empty file, or just comments)

@@ -56,6 +56,12 @@ ELITISM_COUNT = 1     # Number of best individuals to carry over to the next gen
 MUTATION_RATE = 0.7   # Probability of mutating an individual
 CROSSOVER_RATE = 0.2  # Probability of crossing over two parents
 
+# Model settings
+TEMPERATURE_INITIAL_GEN = 1.0
+TEMPERATURE_CROSSOVER = 1.0
+TEMPERATURE_MUTATION_DIFF = 0.75
+TEMPERATURE_FALLBACK_FULL = 0.70
+
 # Evaluation settings
 EVALUATION_TIMEOUT_SECONDS = 800  # Max time for a program to run during evaluation
 

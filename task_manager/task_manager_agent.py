@@ -72,12 +72,11 @@ class TaskManagerAgent(TaskManagerInterface):
 
         self.start_time_overall_run: Optional[float] = None
 
-    async def initialize_population(self) -> List[Program]:  # Method_v2
+    async def initialize_population(self) -> List[Program]:  # Method_v2.1.0 (Lumi's fix for creation_method)
         logger.info(
             f"Initializing population for task: {self.task_definition.id} (Mode: {self.task_definition.improvement_mode})")
         initial_population = []
 
-        # --- Start of new logic for seed code (v2) ---
         programs_to_generate_from_prompt = self.population_size
         start_index_for_prompt_generation = 0
 
@@ -88,46 +87,26 @@ class TaskManagerAgent(TaskManagerInterface):
                 id=program_id,
                 code=self.task_definition.initial_seed_code,
                 generation=0,
-                status="unevaluated"  # Will be evaluated with the rest
+                status="unevaluated",
+                task_id=self.task_definition.id,  # Ensure task_id is set
+                creation_method="initial_seed"  # <--- LUMI'S FIX! ✨
             )
             initial_population.append(seed_program)
-            await self.database.save_program(seed_program)
+            # await self.database.save_program(seed_program) # Let's save all at the end or after evaluation
 
-            programs_to_generate_from_prompt -= 1  # We've created one program from seed
-            start_index_for_prompt_generation = 1  # Next program ID will start from 1
-
-            # Optional: For now, we'll just generate the rest from scratch.
-            # Future idea: Could prompt LLM to create variations of the seed_code here.
-            # For example:
-            # if programs_to_generate_from_prompt > 0:
-            #     variation_prompt = f"Here is a piece of Python code:\n```python\n{self.task_definition.initial_seed_code}\n```\n" \
-            #                        f"Generate {programs_to_generate_from_prompt} slight variations or alternative ways to structure this same logic, " \
-            #                        f"keeping the function signature '{self.task_definition.function_name_to_evolve}' if present. " \
-            #                        "Provide each variation as a complete Python code block, without explanations or markdown fences."
-            #     # Then loop programs_to_generate_from_prompt times, calling self.code_generator.generate_code(variation_prompt)
-            #     # This is more advanced and would require the LLM to give multiple distinct code blocks in one response, or multiple calls.
-            #     # For simplicity in this step, we'll stick to generating the rest from the standard initial prompt.
+            programs_to_generate_from_prompt -= 1
+            start_index_for_prompt_generation = 1
             logger.info(f"Will generate {programs_to_generate_from_prompt} additional programs using initial prompt.")
 
-        # --- End of new logic for seed code (v2) ---
-
-        # Generate the remaining programs (or all, if no seed code) using prompts
         if programs_to_generate_from_prompt > 0:
-            # Determine the prompt to use for initial generation
-            # If it's 'general_refinement' but NO seed was given, this might be an ambiguous state.
-            # For now, we assume if 'general_refinement' is chosen, 'initial_seed_code' *should* be provided.
-            # If we are in 'task_focused' mode OR we are just filling population after a seed, use standard initial prompt.
             if self.task_definition.improvement_mode == "general_refinement" and not self.task_definition.initial_seed_code:
                 logger.warning(
                     f"Task mode is 'general_refinement' but no initial_seed_code was provided. Proceeding with standard initial prompt for task '{self.task_definition.id}'. This might not be the intended behavior.")
 
-            initial_prompt_text = self.prompt_designer.design_initial_prompt(self.task_definition) # <--- ADDED THIS ARGUMENT
+            initial_prompt_text = self.prompt_designer.design_initial_prompt(self.task_definition)
             if not initial_prompt_text.strip() and self.task_definition.improvement_mode == "general_refinement":
-                # This case should ideally be handled by PromptDesignerAgent adapting its initial prompt for refinement if needed.
-                # For now, if PromptDesigner gives empty for refinement, we fall back or warn.
                 logger.warning(
                     "Initial prompt from PromptDesigner was empty for general_refinement mode. This is unexpected.")
-                # A very basic fallback if design_initial_prompt isn't aware of refinement mode yet:
                 initial_prompt_text = (
                     f"You are an expert Python programmer. The primary goal is to work with and refine Python code. "
                     f"The current task is '{self.task_definition.description}'. "
@@ -137,8 +116,6 @@ class TaskManagerAgent(TaskManagerInterface):
                 )
 
             for i in range(start_index_for_prompt_generation, self.population_size):
-                # If we already added a seed program, and start_index is 1, this loop effectively runs fewer times.
-                # Corrected loop condition:
                 if len(initial_population) >= self.population_size:
                     break
 
@@ -146,19 +123,46 @@ class TaskManagerAgent(TaskManagerInterface):
                 logger.debug(
                     f"Generating initial program {len(initial_population) + 1}/{self.population_size} (ID: {program_id}) using prompt.")
 
-                generated_code = await self.code_generator.generate_code(initial_prompt_text, temperature=0.8)
+                # Small rate limit for initial generation if multiple calls are very fast
+                async with self._api_call_semaphore:
+                    current_time = time.monotonic()
+                    time_since_last_call = current_time - self._last_api_call_release_time
+                    if time_since_last_call < MIN_SECONDS_BETWEEN_CALLS:
+                        sleep_duration = MIN_SECONDS_BETWEEN_CALLS - time_since_last_call
+                        logger.debug(f"Rate limiting: sleeping for {sleep_duration:.2f}s before next API call.")
+                        await asyncio.sleep(sleep_duration)
+
+                    generated_code = await self.code_generator.generate_code(initial_prompt_text, temperature=settings.TEMPERATURE_INITIAL_GEN)
+                    self._last_api_call_release_time = time.monotonic()
 
                 program = Program(
                     id=program_id,
                     code=generated_code,
                     generation=0,
                     status="unevaluated",
-                    task_id=self.task_definition.id  # <--- SET THE TASK ID!
+                    task_id=self.task_definition.id,
+                    creation_method="initial_prompt"  # <--- LUMI'S FIX! ✨
                 )
                 initial_population.append(program)
-                await self.database.save_program(program)
+                # await self.database.save_program(program) # Let's save all at the end or after evaluation
 
-        logger.info(f"Initialized population with {len(initial_population)} programs.")
+        # Save all initialized programs to the database (moved from inside the loop)
+        # This might be better done after evaluation, but for now, let's ensure they are saved before returning.
+        # The evaluate_population method will re-save them with updated status and fitness scores.
+        # Actually, initialize_population is called, then evaluate_population.
+        # evaluate_population saves programs *after* they are evaluated.
+        # So, we need to save them here if they need to be in DB before evaluation starts,
+        # or rely on evaluate_population to do the first save.
+        # Let's check `evaluate_population`'s behavior.
+        # `evaluate_population` calls `self.database.save_program(gather_result)` or the modified program.
+        # So, programs created in `initialize_population` don't strictly need to be saved here IF
+        # they are immediately passed to `evaluate_population`.
+        # Let's assume they are: `current_population = await self.initialize_population()`
+        #                       `current_population = await self.evaluate_population(current_population)`
+        # This is fine. The `creation_method` will be set on the object, and `evaluate_population` will save it.
+
+        logger.info(
+            f"Initialized population with {len(initial_population)} programs. Their creation_methods are now set!")
         return initial_population
 
     def _calculate_population_metrics(self, population: List[Program]) -> Dict[str, Any]:  # Method_v1.0.0 (New helper)
@@ -426,7 +430,7 @@ class TaskManagerAgent(TaskManagerInterface):
         # For crossover, we expect a full new code block
         generated_code = await self.code_generator.generate_code(  # Use generate_code directly
             prompt=crossover_prompt,
-            temperature=0.7,  # May want a slightly different temperature for creative synthesis
+            temperature=settings.TEMPERATURE_CROSSOVER,  # May want a slightly different temperature for creative synthesis
             output_format="code"  # Expecting complete code
         )
 
@@ -495,7 +499,7 @@ class TaskManagerAgent(TaskManagerInterface):
 
         logger.info(f"Attempting {prompt_type} for offspring {child_id} using diff format.")
         final_code = await self.code_generator.execute(
-            prompt=mutation_prompt_str, temperature=0.75, output_format="diff", parent_code_for_diff=parent.code
+            prompt=mutation_prompt_str, temperature=settings.TEMPERATURE_MUTATION_DIFF, output_format="diff", parent_code_for_diff=parent.code
         )
 
         diff_failed = False
@@ -521,7 +525,7 @@ class TaskManagerAgent(TaskManagerInterface):
             )
 
             final_code = await self.code_generator.execute(
-                prompt=fallback_prompt, temperature=0.7, output_format="code"
+                prompt=fallback_prompt, temperature=settings.TEMPERATURE_FALLBACK_FULL, output_format="code"
             )
 
             if not final_code.strip():
