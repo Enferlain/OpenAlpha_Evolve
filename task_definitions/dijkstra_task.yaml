@@ -49,7 +49,7 @@ allowed_imports:
 improvement_mode: "task_focused"
 
 primary_focus_metrics:
-  - "pylint_score"
+  - "ruff_violations"
   - "cyclomatic_complexity_avg"
   - "maintainability_index"
 

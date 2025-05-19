@@ -544,26 +544,21 @@ print(json.dumps(final_output, default=custom_json_serializer))
             )
             return None, f"{tool_name}: Unspecified analysis error - {type(e).__name__}"
 
-    async def evaluate_program(self, program: Program, task: TaskDefinition) -> Program:
+    # --- REFINED: evaluate_program (v1.1.1 - Focus on Ruff processing and Status Logic) ---
+    async def evaluate_program(self, program: Program, task: TaskDefinition) -> Program:  # Method_v1.1.1
         logger.debug(
             f"[evaluate_program] Starting for Program ID: {program.id}, Task ID: {task.id}. Current Status: {program.status}")
-        logger.debug(
-            f"[evaluate_program] Program Code (first 200 chars):\n{program.code[:200].replace(chr(10), '<NL>')}")
-
         program.status = "evaluating"
-        program.errors = []  # Clear previous errors
+        program.errors = []
 
-        # Initialize fitness_scores, ensuring all expected keys exist
         default_scores = {
-            "correctness": 0.0,
-            "runtime_ms": float('inf'),
-            "ruff_violations": float('inf'),  # New: For Ruff, higher is worse initially
-            "cyclomatic_complexity_avg": float('inf'),  # For Radon
-            "maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", -1.0),  # For Radon
+            "correctness": 0.0, "runtime_ms": float('inf'),
+            "ruff_violations": float('inf'), "cyclomatic_complexity_avg": float('inf'),
+            "maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", -1.0),
             "passed_tests": 0.0,
             "total_tests": float(len(task.input_output_examples) if task.input_output_examples else 0)
         }
-        program.fitness_scores = {**default_scores, **program.fitness_scores}
+        program.fitness_scores = {**default_scores, **(program.fitness_scores if program.fitness_scores else {})}
 
         # 1. Syntax Check
         syntax_errors = self._check_syntax(program.code)
@@ -571,62 +566,48 @@ print(json.dumps(final_output, default=custom_json_serializer))
             program.errors.extend(syntax_errors)
             program.status = "failed_evaluation_syntax"
             logger.warning(f"[evaluate_program] Syntax errors for {program.id}: {syntax_errors}")
-            # Ensure Ruff score is set even on syntax failure, to avoid key errors downstream
-            program.fitness_scores["ruff_violations"] = float('inf')  # Or a specific high value for syntax error
+            program.fitness_scores["ruff_violations"] = float('inf')
             return program
         logger.debug(f"[evaluate_program] Syntax check passed for {program.id}.")
 
-        temp_code_file_path = None  # Initialize for use in finally block
-
+        temp_code_file_path = None
         try:
-            # 2. Static Analysis (Ruff and Radon)
-            if program.code.strip():  # Only run static analysis if there's actual code
+            # 2. Static Analysis
+            if program.code.strip():
                 logger.debug(f"[evaluate_program] Proceeding with static analysis for {program.id}")
-
-                # Create a temporary file for the code to be analyzed by Ruff and Radon
                 with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding='utf-8') as tmpf:
                     tmpf.write(program.code)
                     temp_code_file_path = tmpf.name
-                logger.debug(f"[evaluate_program] Temp code file for static analysis: {temp_code_file_path}")
 
-                # Determine project_root_path (assuming evaluator_agent.py is in project_root/evaluator_agent/)
                 current_file_dir = os.path.dirname(os.path.abspath(__file__))
                 project_root_path = os.path.dirname(current_file_dir)
 
-                # --- Ruff Analysis ---
-                # You can make 'needs_ruff' conditional based on task.primary_focus_metrics if desired
-                needs_ruff = True
-                if needs_ruff:
-                    logger.info(f"Running Ruff analysis for program {program.id}...")
-                    try:
-                        ruff_violations_list, ruff_violations_count = await asyncio.to_thread(
-                            run_ruff_in_thread, temp_code_file_path, project_root_path
-                            # Ensure run_ruff_in_thread is defined
-                        )
-                        program.fitness_scores["ruff_violations"] = float(ruff_violations_count)
-                        if ruff_violations_count > 0:
-                            logger.info(f"Ruff found {ruff_violations_count} issues for program {program.id}.")
-                            for i, violation in enumerate(ruff_violations_list):
-                                if i < 5:  # Log details for up to 5 violations
-                                    err_msg = (
-                                        f"Ruff-{violation.get('code', 'UNK')}: "
-                                        f"{violation.get('message', 'No message')} "
-                                        f"@ L{violation.get('location', {}).get('row', 0)}, "
-                                        f"C{violation.get('location', {}).get('column', 0)}"
-                                    )
-                                    program.errors.append(err_msg)
-                                    logger.debug(f"  - {err_msg}")
-                                if i == 4 and ruff_violations_count > 5:
-                                    more_issues_msg = f"Ruff: ...and {ruff_violations_count - 5} more issues."
-                                    program.errors.append(more_issues_msg)
-                                    logger.debug(f"  {more_issues_msg}")
-                                    break  # Stop adding individual errors if many
-                        else:
-                            logger.info(f"Ruff analysis clean for program {program.id}.")
-                    except Exception as e_ruff_call:
-                        logger.error(f"Error calling/processing Ruff for {program.id}: {e_ruff_call}", exc_info=True)
-                        program.errors.append(f"Ruff: Error during analysis - {type(e_ruff_call).__name__}")
-                        program.fitness_scores["ruff_violations"] = float('inf')  # Indicate failure
+                # --- Ruff Analysis (Ensuring all violations counted and logged) ---
+                logger.info(f"Running Ruff analysis for program {program.id}...")
+                try:
+                    ruff_violations_list, ruff_violations_count_from_func = await asyncio.to_thread(
+                        run_ruff_in_thread, temp_code_file_path, project_root_path
+                    )
+                    program.fitness_scores["ruff_violations"] = float(ruff_violations_count_from_func)
+
+                    if ruff_violations_count_from_func > 0:
+                        logger.info(f"Ruff found {ruff_violations_count_from_func} issues for program {program.id}.")
+                        for i, violation in enumerate(ruff_violations_list):  # Iterate ALL
+                            err_msg = (f"Ruff-{violation.get('code', 'UNK')}: "
+                                       f"{violation.get('message', 'No message')} "
+                                       f"@ L{violation.get('location', {}).get('row', 0)}, "
+                                       f"C{violation.get('location', {}).get('column', 0)}")
+                            program.errors.append(err_msg)
+                            if i < 5: logger.debug(f"  - {err_msg}")
+                            if i == 4 and ruff_violations_count_from_func > 5:
+                                logger.debug(f"  ...and {ruff_violations_count_from_func - 5} more Ruff issues.")
+                    else:
+                        logger.info(f"Ruff analysis clean for program {program.id}.")
+                        program.fitness_scores["ruff_violations"] = 0.0
+                except Exception as e_ruff_call:
+                    logger.error(f"Error calling/processing Ruff for {program.id}: {e_ruff_call}", exc_info=True)
+                    program.errors.append(f"Ruff: Error during analysis - {type(e_ruff_call).__name__}")
+                    program.fitness_scores["ruff_violations"] = float('inf')
 
                 # --- Radon Analysis (Cyclomatic Complexity & Maintainability Index) ---
                 needs_radon_cc = "cyclomatic_complexity_avg" in (task.primary_focus_metrics or []) or \
@@ -695,111 +676,97 @@ print(json.dumps(final_output, default=custom_json_serializer))
                         program.fitness_scores["maintainability_index"] = settings.DEFAULT_METRIC_VALUE.get(
                             "maintainability_index", -1.0)
 
-            elif not program.code.strip():  # Program code is empty
-                logger.info(
-                    f"[evaluate_program] Program {program.id} has empty code. Skipping static analysis, assigning default 'good' static scores.")
+            elif not program.code.strip():
+                logger.info(f"[evaluate_program] Program {program.id} has empty code. Defaulting static scores.")
                 program.fitness_scores["ruff_violations"] = 0.0
                 program.fitness_scores["cyclomatic_complexity_avg"] = 0.0
-                program.fitness_scores["maintainability_index"] = 100.0  # Max MI for empty code
+                program.fitness_scores["maintainability_index"] = 100.0
 
-            # 3. Functional Evaluation (I/O examples)
+            # 3. Functional Evaluation
+            # This section should populate program.fitness_scores["correctness"], ["passed_tests"], ["runtime_ms"]
+            # and add execution-related errors to program.errors
+            # The _execute_code_safely and _assess_correctness methods from your file seemed okay.
             if task.input_output_examples:
-                logger.debug(
-                    f"[evaluate_program] Starting functional evaluation for {program.id} against {len(task.input_output_examples)} test cases.")
-                execution_results, execution_error = await self._execute_code_safely(program.code,
-                                                                                     task_for_examples=task)
-
-                if execution_error:
-                    logger.warning(f"[evaluate_program] Execution error for {program.id}: {execution_error}")
-                    program.errors.append(f"Execution Error: {execution_error}")
+                logger.debug(f"[evaluate_program] Starting functional evaluation for {program.id}...")
+                execution_results, execution_error_msg = await self._execute_code_safely(program.code,
+                                                                                         task_for_examples=task)
+                if execution_error_msg:
+                    program.errors.append(f"Execution Error: {execution_error_msg}")
                     program.fitness_scores["correctness"] = 0.0
-                    program.status = "failed_evaluation_execution"
                 elif execution_results and "test_outputs" in execution_results:
-                    logger.debug(
-                        f"[evaluate_program] Execution results for {program.id} (first 200 chars of test_outputs): {str(execution_results.get('test_outputs'))[:200]}")
                     correctness, passed_tests, total_tests = self._assess_correctness(execution_results,
                                                                                       task.input_output_examples)
-
                     program.fitness_scores["correctness"] = correctness
                     program.fitness_scores["passed_tests"] = float(passed_tests)
-                    # program.fitness_scores["total_tests"] is already set from default_scores
-
-                    # Update runtime only if it was successful and correctness is > 0 (or based on your criteria)
                     avg_runtime = execution_results.get("average_runtime_ms")
-                    if avg_runtime is not None and correctness > 0:  # type: ignore
-                        program.fitness_scores["runtime_ms"] = avg_runtime  # type: ignore
-                    elif avg_runtime is not None:  # It ran, but wasn't correct
-                        program.fitness_scores["runtime_ms"] = avg_runtime  # type: ignore # Still record runtime
-                    else:  # avg_runtime is None (shouldn't happen if execution_results is well-formed)
-                        program.fitness_scores["runtime_ms"] = float('inf')
-
-                    if correctness < 1.0:  # No need for "and not execution_error" as that's a separate path
+                    if avg_runtime is not None: program.fitness_scores["runtime_ms"] = avg_runtime
+                    if correctness < 1.0:  # Add summary of test failures if not all passed
                         program.errors.append(
                             f"Failed {int(total_tests - passed_tests)} out of {int(total_tests)} I/O test cases.")
-                        # Don't override a more specific failure status like failed_evaluation_execution
-                        if program.status == "evaluating":
-                            program.status = "failed_evaluation_tests"
-                else:  # execution_results is None or malformed, and no execution_error string
-                    logger.warning(
-                        f"[evaluate_program] Execution of {program.id} yielded no results or malformed results from _execute_code_safely. Raw results: {str(execution_results)[:200]}")
+                else:  # Malformed execution results
                     program.errors.append("Execution Error: Unknown issue or malformed results from sandbox.")
                     program.fitness_scores["correctness"] = 0.0
-                    if program.status == "evaluating":
-                        program.status = "failed_evaluation_unknown_exec"
+            elif task.improvement_mode == "task_focused" and not task.input_output_examples:  # No tests to run
+                program.errors.append("Evaluation: Task 'task_focused' but no I/O examples for correctness check.")
+                # Correctness remains default 0, or could be set to 1.0 if no tests means "not failed"
+                # Let's assume correctness 0 if it can't be verified for task_focused.
 
-            elif task.improvement_mode == "task_focused" and not task.input_output_examples:
-                logger.warning(
-                    f"[evaluate_program] Task {task.id} is 'task_focused' but has no I/O examples. Cannot assess correctness.")
-                program.errors.append("Evaluation: Task 'task_focused' but no I/O examples.")
-                if not program.errors and program.status == "evaluating":  # Only set if no other errors
-                    program.status = "evaluated_no_tests"
+            # --- UNTANGLED AND REFINED Final Status Determination Logic ---
+            if program.status == "evaluating":  # Check if status hasn't been set to a critical failure already
 
-            # 4. Final status determination
-            if not program.errors and program.status == "evaluating":
-                program.status = "evaluated"
-            elif program.errors and program.status == "evaluating":  # Errors were added, but status not specifically set to a failure type
-                program.status = "failed_evaluation_generic"  # A generic failure if specific one not set
+                # Identify critical errors (errors not from Ruff, and not simple I/O test failure summaries)
+                # The "Failed X out of Y test cases" is informational for the LLM, not a "crash" error.
+                critical_error_messages = [
+                    e for e in program.errors
+                    if not e.strip().lower().startswith("ruff-") and
+                       not e.strip().lower().startswith("failed")  # Exclude "Failed X out of Y I/O test cases"
+                ]
 
-        except Exception as e_evaluate_program:  # Catch-all for unexpected errors within the try block
-            logger.error(
-                f"[evaluate_program] CRITICAL unhandled exception during evaluation of {program.id}: {e_evaluate_program}",
-                exc_info=True)
+                current_correctness = program.fitness_scores.get("correctness", 0.0)
+
+                if critical_error_messages:  # Any execution crash, sandbox issue, etc.
+                    program.status = "failed_evaluation_execution"
+                elif task.input_output_examples and current_correctness < 1.0:  # Failed functional tests
+                    program.status = "failed_evaluation_tests"
+                else:  # No critical errors, and 100% correct (or no I/O tests for non-task_focused modes)
+                    program.status = "evaluated"
+                    # At this point, program.errors might still contain Ruff messages.
+                    # This means "evaluated with lint issues", which is fine.
+
+            # One final check: if no I/O examples were provided and it's task_focused, status might need adjustment
+            # if we didn't set it to a failure above.
+            # If mode is task_focused, no I/O examples provided, and no other critical errors -> it's hard to judge.
+            # For now, the logic above would set it to "evaluated" if no critical errors.
+            # The `program.errors.append("Evaluation: Task 'task_focused' but no I/O examples for correctness check.")`
+            # will be a hint.
+
+        except Exception as e_evaluate_program:  # Catch-all for the entire try block
+            logger.error(f"[evaluate_program] CRITICAL unhandled exception: {e_evaluate_program}", exc_info=True)
             program.errors.append(
                 f"Critical Evaluation Error: {type(e_evaluate_program).__name__} - {str(e_evaluate_program)}")
             program.status = "failed_evaluation_internal_critical"
-            # Ensure all fitness scores reflect failure
             for key in program.fitness_scores:
-                if key == "ruff_violations":
+                if key in ["ruff_violations", "runtime_ms", "cyclomatic_complexity_avg"]:
                     program.fitness_scores[key] = float('inf')
-                elif key == "runtime_ms":
-                    program.fitness_scores[key] = float('inf')
-                elif key == "correctness":
-                    program.fitness_scores[key] = 0.0
-                # Add other metrics as needed
-
-        finally:  # Ensure temporary file is always cleaned up if it was created
+                elif key in ["correctness", "passed_tests", "maintainability_index"]:
+                    program.fitness_scores[key] = 0.0 if key != "maintainability_index" else -1.0
+        finally:
             if temp_code_file_path and os.path.exists(temp_code_file_path):
                 try:
                     os.remove(temp_code_file_path)
-                    logger.debug(f"[evaluate_program] Cleaned up temp static analysis file: {temp_code_file_path}")
                 except Exception as e_cleanup:
-                    logger.error(f"Error during cleanup of temp file {temp_code_file_path}: {e_cleanup}")
+                    logger.error(f"Error cleaning temp file {temp_code_file_path}: {e_cleanup}")
 
         logger.info(
-            f"[evaluate_program] FINALIZED for Program ID: {program.id}. "
-            f"Status: {program.status}. "
+            f"[evaluate_program] FINALIZED for Program ID: {program.id}. Status: {program.status}. "
             f"Correctness: {program.fitness_scores.get('correctness', 0.0) * 100:.1f}%, "
             f"Ruff Violations: {program.fitness_scores.get('ruff_violations', 'N/A')}, "
-            f"Runtime: {program.fitness_scores.get('runtime_ms', 'N/A'):.2f}ms. "
-            f"Errors: {len(program.errors)}"
+            f"Errors reported: {len(program.errors)}"
         )
-        logger.debug(f"Full fitness scores for {program.id}: {program.fitness_scores}")
-        if program.errors:
-            logger.debug(f"Detailed errors for {program.id}: {program.errors}")
-
+        # logger.debug(f"Full fitness scores for {program.id}: {program.fitness_scores}") # Already in INFO
+        if program.errors: logger.debug(f"Detailed errors for {program.id}: {program.errors}")
         return program
 
-    # MODIFIED execute method:
     async def execute(self, *args, **kwargs) -> Program:  # Signature changed to match BaseAgent
         """
         Generic execute method required by BaseAgent.
@@ -808,9 +775,9 @@ print(json.dumps(final_output, default=custom_json_serializer))
         """
         program_arg = kwargs.get("program")
         task_arg = kwargs.get("task")
-        logger.debug(f"[execute wrapper] Called with program: {program_arg.id if program_arg else 'None'}, task: {task_arg.id if task_arg else 'None'}")
+        logger.debug(
+            f"[execute wrapper] Called with program: {program_arg.id if program_arg else 'None'}, task: {task_arg.id if task_arg else 'None'}")
 
-        # Validate that we got the arguments we need to call evaluate_program
         if not isinstance(program_arg, Program):
             err_msg = f"EvaluatorAgent.execute expects 'program' of type Program in kwargs, but got {type(program_arg)}."
             logger.error(err_msg)
@@ -823,5 +790,4 @@ print(json.dumps(final_output, default=custom_json_serializer))
 
         logger.debug(
             f"EvaluatorAgent.execute is delegating to evaluate_program for program '{program_arg.id}', task '{task_arg.id}'")
-        # Now, call the main evaluation logic
         return await self.evaluate_program(program_arg, task_arg)
