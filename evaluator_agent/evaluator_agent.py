@@ -22,130 +22,81 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
-# Method_v1.3.7 ("Trust Pylint with RCFile" Attempt)
-def run_pylint_in_thread(file_path: str) -> tuple[Optional[float], int]:
-    temp_file_directory = os.path.dirname(file_path)
-    original_sys_path = list(sys.path)
+# Method_v1.4.0 ("Integrate Ruff for Linting")
+def run_ruff_in_thread(file_path: str, project_root: str) -> Tuple[List[Dict[str, Any]], int]:
+    """
+    Runs Ruff on the given file and returns the list of violations and their count.
+    Ruff is expected to be configured via pyproject.toml in the project_root.
 
-    current_script_path = os.path.abspath(__file__)
-    evaluator_agent_dir = os.path.dirname(current_script_path)
-    project_root = os.path.dirname(evaluator_agent_dir)
-    pylintrc_path = os.path.join(project_root, ".pylintrc")
+    Args:
+        file_path: The absolute path to the temporary Python script to lint.
+        project_root: The absolute path to the project root where pyproject.toml is located.
 
-    logger.debug(f"run_pylint_in_thread: Determined absolute path for .pylintrc: {pylintrc_path}")
+    Returns:
+        A tuple containing:
+        - A list of violation objects (dictionaries) from Ruff's JSON output.
+        - An integer count of the total violations found.
+    """
+    logger.info(f"Running Ruff analysis for program file: {file_path}")
+    logger.debug(f"Project root for Ruff (pyproject.toml lookup): {project_root}")
 
-    # --- Crucial Pylint Options ---
-    # These are options that configure Pylint's behavior or are essential for our use.
-    pylint_opts = [
-        file_path,  # The file to lint MUST come AFTER options for lint.Run
-        "--persistent=n",  # Disable caching of results
-        "--score=y",  # We definitely want the score output
+    command = [
+        sys.executable,
+        "-m",
+        "ruff",
+        "check",
+        "--output-format=json",
+        "--no-cache",
+        file_path
     ]
 
-    if os.path.exists(pylintrc_path):
-        pylint_opts.append(f"--rcfile={pylintrc_path}")
-        logger.info(f"Using .pylintrc: {pylintrc_path}")
-    else:
-        logger.warning(f"No .pylintrc found at {pylintrc_path}. Pylint will use defaults.")
-        # If no rcfile, we might need some basic default enables if Pylint doesn't run much by default.
-        # However, Pylint's default is to enable most things. Let's see.
-        # We could add: pylint_opts.append("--enable=C,R,W,E,F") here if needed.
-
-    # This was our specific fix for an overgeneral exceptions warning pattern.
-    # It's a direct command-line argument that Pylint understands.
-    pylint_opts.append("--overgeneral-exceptions=")
-
-    logger.debug(f"run_pylint_in_thread: Effective pylint_opts for lint.Run: {pylint_opts}")
-
-    captured_pylint_stdout = io.StringIO()  # For Pylint's actual report
-    captured_pylint_stderr = io.StringIO()  # For Pylint's own errors/warnings
-
-    linter_instance_from_run = None
-    score = None
-    statements = 0
+    violations_list: List[Dict[str, Any]] = []
+    violations_count = 0
 
     try:
-        # Temporarily modify sys.path for Pylint to find the temp file as a module
-        if temp_file_directory not in sys.path:
-            sys.path.insert(0, temp_file_directory)
-            logger.debug(
-                f"run_pylint_in_thread: Added '{temp_file_directory}' to sys.path for Pylint module resolution.")
-
-        # Use redirect_stderr to catch Pylint's internal errors/warnings if it prints to stderr
-        # The TextReporter (default for lint.Run unless output-format is changed) writes to stdout.
-        with redirect_stdout(captured_pylint_stdout), redirect_stderr(captured_pylint_stderr):
-            # lint.Run is the standard high-level way to invoke Pylint programmatically.
-            # It handles linter creation, config loading (rcfile + cmdline), checking, and reporting.
-            # The `exit=False` prevents it from calling sys.exit().
-            pylint_run = lint.Run(pylint_opts, exit=False)
-
-            # After Run completes, the linter instance it used should have stats
-            if hasattr(pylint_run, 'linter') and pylint_run.linter is not None:
-                linter_instance_from_run = pylint_run.linter
-            else:
-                logger.error("lint.Run did not produce a usable linter instance.")
-                # No need to restore sys.path here, finally block handles it.
-                return None, 0  # Cannot get score if linter is missing
-
-        # --- End of Pylint execution block ---
-
-        pylint_report_output = captured_pylint_stdout.getvalue()
-        pylint_error_output = captured_pylint_stderr.getvalue()
-
-        if pylint_report_output.strip():
-            logger.debug(f"Pylint captured stdout (report) for {file_path}:\n{pylint_report_output}")
-        if pylint_error_output.strip():
-            # This is where we'd see the AttributeError if it still happens, or other Pylint errors.
-            logger.warning(f"Pylint captured stderr for {file_path}:\n{pylint_error_output}")
-
-        # Check stderr for the specific AttributeError or other critical errors
-        if "AttributeError: 'Namespace' object has no attribute 'mixin_class_rgx'" in pylint_error_output:
-            logger.critical(f"PERSISTENT AttributeError for mixin_class_rgx with file {file_path}!")
-            # This would indicate a very fundamental issue with how this Pylint version handles this rcfile option.
-        elif "fatal" in pylint_error_output.lower() or "astroid-error" in pylint_error_output.lower():
-            logger.error(f"Pylint reported a fatal/astroid error for {file_path}. Score might be unreliable.")
-            # Fall through to try and get score, but it will likely be 0 or low.
-
-        # Extract score and statements from the linter instance used by Run
-        if linter_instance_from_run and hasattr(linter_instance_from_run,
-                                                'stats') and linter_instance_from_run.stats is not None:
-            if hasattr(linter_instance_from_run.stats, 'global_note'):
-                score = linter_instance_from_run.stats.global_note
-            if hasattr(linter_instance_from_run.stats, 'statement'):
-                statements = linter_instance_from_run.stats.statement
-
-            if score is None and not (
-                    "fatal" in pylint_error_output.lower() or "astroid-error" in pylint_error_output.lower()):
-                # If score is None but no obvious Pylint crash, log details from stats
-                s = linter_instance_from_run.stats
-                logger.warning(
-                    f"Pylint global_note (score) is None for {file_path}. Stats: E={getattr(s, 'error', 'N/A')}, "
-                    f"W={getattr(s, 'warning', 'N/A')}, C={getattr(s, 'convention', 'N/A')}, R={getattr(s, 'refactor', 'N/A')}"
-                )
-        elif score is None:  # Catch all if score is still None (e.g., due to earlier error or no stats)
-            logger.warning(
-                f"Pylint score is None for {file_path}. Check Pylint stderr for errors. Setting score to 0.0 if error occurred.")
-            if "fatal" in pylint_error_output.lower() or "astroid-error" in pylint_error_output.lower() or "AttributeError" in pylint_error_output:
-                score = 0.0
-
-        logger.debug(f"Pylint run on {file_path} completed. Score: {score}, Statements: {statements}")
-        return score, statements
-
-    except Exception as e_pylint_thread:  # Catch any other unexpected exception during this process
-        logger.error(
-            f"CRITICAL Exception in run_pylint_in_thread for file {file_path}: {e_pylint_thread}",
-            exc_info=True
+        logger.debug(f"Executing Ruff command: {' '.join(command)}")
+        process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+            cwd=project_root
         )
-        # Log any captured output even on broader exception
-        stdout_on_exc = captured_pylint_stdout.getvalue()
-        stderr_on_exc = captured_pylint_stderr.getvalue()
-        if stdout_on_exc.strip(): logger.debug(f"Pylint stdout on broader exception: {stdout_on_exc}")
-        if stderr_on_exc.strip(): logger.error(f"Pylint stderr on broader exception: {stderr_on_exc}")
-        return None, 0
-    finally:
-        # Crucial: Restore sys.path
-        sys.path = original_sys_path
-        logger.debug(f"run_pylint_in_thread: Restored original sys.path in finally block ({temp_file_directory}).")
+
+        stdout_str = process.stdout.strip()
+        stderr_str = process.stderr.strip()
+
+        if stderr_str:
+            logger.warning(f"Ruff stderr output for {file_path}:\n{stderr_str}")
+
+        if stdout_str:
+            logger.debug(f"Ruff stdout (JSON output) for {file_path}:\n{stdout_str}")
+            try:
+                parsed_json = json.loads(stdout_str)
+                if isinstance(parsed_json, list):
+                    violations_list = parsed_json
+                    violations_count = len(violations_list)
+                    logger.info(f"Ruff found {violations_count} issues for {file_path}.")
+                else:
+                    logger.error(f"Ruff JSON output was not a list as expected for {file_path}. Output: {stdout_str}")
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to decode Ruff JSON output for {file_path}: {e}. Raw output: '{stdout_str}'")
+        else:
+            logger.warning(f"Ruff produced no stdout for {file_path}. Exit code: {process.returncode}. Stderr: {stderr_str}")
+
+        if process.returncode > 1:
+            logger.error(f"Ruff execution failed with exit code {process.returncode} for {file_path}. Stderr: {stderr_str}")
+
+    except subprocess.TimeoutExpired:
+        logger.error(f"Ruff execution timed out for {file_path}.")
+    except FileNotFoundError:
+        logger.error(f"Ruff command not found. Is `ruff` installed and in PATH or `sys.executable -m ruff` working? Command: {' '.join(command)}")
+    except Exception as e_ruff:
+        logger.error(f"An unexpected error occurred during Ruff execution for {file_path}: {e_ruff}", exc_info=True)
+
+    logger.debug(f"Ruff analysis for {file_path} completed. Violations found: {violations_count}")
+    return violations_list, violations_count
 
 
 # To this (BaseAgent is inherited via EvaluatorAgentInterface):
@@ -599,99 +550,103 @@ print(json.dumps(final_output, default=custom_json_serializer))
         logger.debug(
             f"[evaluate_program] Program Code (first 200 chars):\n{program.code[:200].replace(chr(10), '<NL>')}")
 
-        program.status = "evaluating"  # Set status at the beginning
+        program.status = "evaluating"
         program.errors = []  # Clear previous errors
-        # Initialize fitness_scores if not already, or ensure keys exist
+
+        # Initialize fitness_scores, ensuring all expected keys exist
         default_scores = {
-            "correctness": 0.0, "runtime_ms": float('inf'),
-            "pylint_score": settings.DEFAULT_METRIC_VALUE.get("pylint_score", -10.0),
-            "cyclomatic_complexity_avg": float('inf'),
-            "maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", -1.0),
+            "correctness": 0.0,
+            "runtime_ms": float('inf'),
+            "ruff_violations": float('inf'),  # New: For Ruff, higher is worse initially
+            "cyclomatic_complexity_avg": float('inf'),  # For Radon
+            "maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", -1.0),  # For Radon
             "passed_tests": 0.0,
             "total_tests": float(len(task.input_output_examples) if task.input_output_examples else 0)
         }
         program.fitness_scores = {**default_scores, **program.fitness_scores}
 
+        # 1. Syntax Check
         syntax_errors = self._check_syntax(program.code)
         if syntax_errors:
             program.errors.extend(syntax_errors)
-            program.status = "failed_evaluation_syntax"  # More specific status
+            program.status = "failed_evaluation_syntax"
             logger.warning(f"[evaluate_program] Syntax errors for {program.id}: {syntax_errors}")
-            logger.debug(
-                f"[evaluate_program] FINALIZING for {program.id}. Status: {program.status}. Fitness: {program.fitness_scores}. Errors: {program.errors}. Returning program object.")
-            return program  # Return the program object with errors
+            # Ensure Ruff score is set even on syntax failure, to avoid key errors downstream
+            program.fitness_scores["ruff_violations"] = float('inf')  # Or a specific high value for syntax error
+            return program
         logger.debug(f"[evaluate_program] Syntax check passed for {program.id}.")
 
-        # --- Static Analysis Block ---
-        temp_code_file_path = None
-        if program.code.strip():
-            logger.debug(f"[evaluate_program] Proceeding with static analysis for {program.id}")
-            try:
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmpf:
+        temp_code_file_path = None  # Initialize for use in finally block
+
+        try:
+            # 2. Static Analysis (Ruff and Radon)
+            if program.code.strip():  # Only run static analysis if there's actual code
+                logger.debug(f"[evaluate_program] Proceeding with static analysis for {program.id}")
+
+                # Create a temporary file for the code to be analyzed by Ruff and Radon
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding='utf-8') as tmpf:
                     tmpf.write(program.code)
                     temp_code_file_path = tmpf.name
                 logger.debug(f"[evaluate_program] Temp code file for static analysis: {temp_code_file_path}")
 
-                needs_pylint = "pylint_score" in (task.primary_focus_metrics or []) or \
-                               task.improvement_mode == "general_refinement"
+                # Determine project_root_path (assuming evaluator_agent.py is in project_root/evaluator_agent/)
+                current_file_dir = os.path.dirname(os.path.abspath(__file__))
+                project_root_path = os.path.dirname(current_file_dir)
 
-                if needs_pylint:
-                    logger.info(f"Running Pylint analysis (as library) for program {program.id}...")
+                # --- Ruff Analysis ---
+                # You can make 'needs_ruff' conditional based on task.primary_focus_metrics if desired
+                needs_ruff = True
+                if needs_ruff:
+                    logger.info(f"Running Ruff analysis for program {program.id}...")
                     try:
-                        # REMOVE THE NESTED DEFINITION OF run_pylint_in_thread HERE! ✨
-                        # No more: def run_pylint_in_thread(file_path): ...
-
-                        # This call will now use the top-level/module-level run_pylint_in_thread
-                        # which contains our fixes (Method_v1.2.2).
-                        pylint_score_val, pylint_statement_count = await asyncio.to_thread(
-                            run_pylint_in_thread, # Correctly refers to the outer/fixed version
-                            temp_code_file_path
+                        ruff_violations_list, ruff_violations_count = await asyncio.to_thread(
+                            run_ruff_in_thread, temp_code_file_path, project_root_path
+                            # Ensure run_ruff_in_thread is defined
                         )
-
-                        if pylint_statement_count == 0 and not program.code.strip().startswith("def"):
-                            # If no statements were found by Pylint (e.g. empty file, or just comments)
-                            # and it's not clearly just a function definition (which might have 0 statements if it's just `pass`)
-                            # assign a neutral or low score.
-                            logger.info(
-                                f"Pylint found 0 statements for program {program.id}. Assigning Pylint score of 0.0.")
-                            program.fitness_scores["pylint_score"] = 0.0
-                        elif pylint_score_val is not None:
-                            program.fitness_scores["pylint_score"] = float(pylint_score_val)
-                            logger.info(
-                                f"Pylint score for program {program.id}: {program.fitness_scores['pylint_score']:.2f}/10")
+                        program.fitness_scores["ruff_violations"] = float(ruff_violations_count)
+                        if ruff_violations_count > 0:
+                            logger.info(f"Ruff found {ruff_violations_count} issues for program {program.id}.")
+                            for i, violation in enumerate(ruff_violations_list):
+                                if i < 5:  # Log details for up to 5 violations
+                                    err_msg = (
+                                        f"Ruff-{violation.get('code', 'UNK')}: "
+                                        f"{violation.get('message', 'No message')} "
+                                        f"@ L{violation.get('location', {}).get('row', 0)}, "
+                                        f"C{violation.get('location', {}).get('column', 0)}"
+                                    )
+                                    program.errors.append(err_msg)
+                                    logger.debug(f"  - {err_msg}")
+                                if i == 4 and ruff_violations_count > 5:
+                                    more_issues_msg = f"Ruff: ...and {ruff_violations_count - 5} more issues."
+                                    program.errors.append(more_issues_msg)
+                                    logger.debug(f"  {more_issues_msg}")
+                                    break  # Stop adding individual errors if many
                         else:
-                            logger.warning(
-                                f"Could not retrieve Pylint score for {program.id} using library method. linter.stats.global_note was None.")
-                            program.errors.append("Pylint: Failed to retrieve score programmatically.")
-                            # Keep the default -10.0 to indicate an issue
-                    except Exception as e_pylint:
-                        logger.error(f"Error running Pylint as library for {program.id}: {e_pylint}", exc_info=True)
-                        program.errors.append(f"Pylint: Error during analysis - {type(e_pylint).__name__}")
-                        # Keep the default -10.0
+                            logger.info(f"Ruff analysis clean for program {program.id}.")
+                    except Exception as e_ruff_call:
+                        logger.error(f"Error calling/processing Ruff for {program.id}: {e_ruff_call}", exc_info=True)
+                        program.errors.append(f"Ruff: Error during analysis - {type(e_ruff_call).__name__}")
+                        program.fitness_scores["ruff_violations"] = float('inf')  # Indicate failure
 
-                # --- Radon Analysis (remains the same, uses subprocess) ---
+                # --- Radon Analysis (Cyclomatic Complexity & Maintainability Index) ---
                 needs_radon_cc = "cyclomatic_complexity_avg" in (task.primary_focus_metrics or []) or \
                                  task.improvement_mode == "general_refinement"
                 needs_radon_mi = "maintainability_index" in (task.primary_focus_metrics or []) or \
                                  task.improvement_mode == "general_refinement"
 
-                # Radon Analysis - Cyclomatic Complexity (using JSON output)
                 if needs_radon_cc:
                     logger.info(f"Running Radon CC analysis for program {program.id}...")
                     radon_cc_cmd = [sys.executable, "-m", "radon", "cc", "-j", temp_code_file_path]
                     cc_data, cc_error = await self._run_static_analysis_tool("Radon CC", radon_cc_cmd, program.id)
                     if cc_error:
                         program.errors.append(cc_error)
-                    elif cc_data and isinstance(cc_data, dict):  # Expecting a dict keyed by filename
-                        # The JSON output is a dict where keys are filenames.
-                        # We expect only one file, our temp_code_file_path.
-                        file_metrics = cc_data.get(
-                            os.path.basename(temp_code_file_path))  # Or use the full path if radon returns that
-                        if not file_metrics and len(cc_data) == 1:  # If only one key, assume it's our file
+                        program.fitness_scores["cyclomatic_complexity_avg"] = float('inf')
+                    elif cc_data and isinstance(cc_data, dict):
+                        file_metrics = cc_data.get(os.path.basename(temp_code_file_path))
+                        if not file_metrics and len(cc_data) == 1:
                             file_metrics = list(cc_data.values())[0]
 
-                        if isinstance(file_metrics,
-                                      list):  # Radon cc -j output is a list of dicts for functions/classes
+                        if isinstance(file_metrics, list):
                             total_complexity = 0
                             count = 0
                             for item_metric in file_metrics:
@@ -702,22 +657,26 @@ print(json.dumps(final_output, default=custom_json_serializer))
                                 program.fitness_scores["cyclomatic_complexity_avg"] = total_complexity / count
                                 logger.info(
                                     f"Radon Avg CC for program {program.id}: {program.fitness_scores['cyclomatic_complexity_avg']:.2f}")
-                            else:  # Empty file or no analysable blocks
+                            else:
                                 program.fitness_scores["cyclomatic_complexity_avg"] = 0.0
                                 logger.info(
-                                    f"Radon Avg CC for program {program.id}: 0.0 (no complex blocks found or empty file)")
-                        else:  # Fallback if parsing structure is unexpected or for empty files that might give empty dict.
+                                    f"Radon Avg CC for program {program.id}: 0.0 (no complex blocks or empty file)")
+                        else:
                             logger.warning(
                                 f"Could not determine Radon CC from parsed JSON for {program.id}. Data: {cc_data}")
-                            program.fitness_scores["cyclomatic_complexity_avg"] = float('inf')  # Indicate error/unknown
+                            program.fitness_scores["cyclomatic_complexity_avg"] = float('inf')
+                    else:  # cc_data is None or not a dict
+                        program.fitness_scores["cyclomatic_complexity_avg"] = float(
+                            'inf')  # Default if tool fails or no output
 
-                # Radon Analysis - Maintainability Index (using JSON output)
                 if needs_radon_mi:
                     logger.info(f"Running Radon MI analysis for program {program.id}...")
                     radon_mi_cmd = [sys.executable, "-m", "radon", "mi", "-j", temp_code_file_path]
-                    mi_data, mi_error = await self._run_static_analysis_tool("Radon MI", radon_mi_cmd, program.id) # No temp_file_path here
+                    mi_data, mi_error = await self._run_static_analysis_tool("Radon MI", radon_mi_cmd, program.id)
                     if mi_error:
                         program.errors.append(mi_error)
+                        program.fitness_scores["maintainability_index"] = settings.DEFAULT_METRIC_VALUE.get(
+                            "maintainability_index", -1.0)
                     elif mi_data and isinstance(mi_data, dict):
                         file_metrics = mi_data.get(os.path.basename(temp_code_file_path))
                         if not file_metrics and len(mi_data) == 1:
@@ -727,80 +686,117 @@ print(json.dumps(final_output, default=custom_json_serializer))
                             program.fitness_scores["maintainability_index"] = float(file_metrics["mi"])
                             logger.info(
                                 f"Radon MI for program {program.id}: {program.fitness_scores['maintainability_index']:.2f}")
-                        else:  # Fallback for empty files or unexpected structure.
+                        else:
                             logger.warning(
                                 f"Could not determine Radon MI from parsed JSON for {program.id}. Data: {mi_data}")
-                            program.fitness_scores["maintainability_index"] = -1.0  # Indicate error/unknown
+                            program.fitness_scores["maintainability_index"] = settings.DEFAULT_METRIC_VALUE.get(
+                                "maintainability_index", -1.0)
+                    else:  # mi_data is None or not a dict
+                        program.fitness_scores["maintainability_index"] = settings.DEFAULT_METRIC_VALUE.get(
+                            "maintainability_index", -1.0)
 
-            except Exception as e_static:
-                logger.error(
-                    f"[evaluate_program] Unexpected error during static analysis setup/exec for {program.id}: {e_static}",
-                    exc_info=True)
-                program.errors.append(f"Static Analysis: General error - {type(e_static).__name__}")
-                # Don't return yet, try functional evaluation if possible, or let it proceed to set status.
-            finally:
-                if temp_code_file_path and os.path.exists(temp_code_file_path):
-                    os.remove(temp_code_file_path)
-                    logger.debug(f"[evaluate_program] Removed temp static analysis file: {temp_code_file_path}")
-        elif not program.code.strip():
-            logger.info(
-                f"[evaluate_program] Program {program.id} has empty code. Skipping static analysis, assigning default 'bad' static scores.")
-            # Defaults already set, but can re-affirm or log here.
+            elif not program.code.strip():  # Program code is empty
+                logger.info(
+                    f"[evaluate_program] Program {program.id} has empty code. Skipping static analysis, assigning default 'good' static scores.")
+                program.fitness_scores["ruff_violations"] = 0.0
+                program.fitness_scores["cyclomatic_complexity_avg"] = 0.0
+                program.fitness_scores["maintainability_index"] = 100.0  # Max MI for empty code
 
-        # --- Functional Evaluation (I/O examples) ---
-        if task.input_output_examples:
-            logger.debug(
-                f"[evaluate_program] Starting functional evaluation for {program.id} against {len(task.input_output_examples)} test cases.")
-            execution_results, execution_error = await self._execute_code_safely(program.code, task_for_examples=task)
-
-            logger.debug(
-                f"[evaluate_program] _execute_code_safely returned for {program.id} -> execution_results: {str(execution_results)[:200]}..., execution_error: {execution_error}")
-
-            if execution_error:
-                logger.warning(f"[evaluate_program] Execution error for {program.id}: {execution_error}")
-                program.errors.append(f"Execution Error: {execution_error}")
-                program.fitness_scores["correctness"] = 0.0
-                program.status = "failed_evaluation_execution"  # More specific
-            elif execution_results and "test_outputs" in execution_results:  # Ensure "test_outputs" exists
+            # 3. Functional Evaluation (I/O examples)
+            if task.input_output_examples:
                 logger.debug(
-                    f"[evaluate_program] Execution results for {program.id} (first 200 chars of test_outputs): {str(execution_results.get('test_outputs'))[:200]}")
-                correctness, passed_tests, total_tests = self._assess_correctness(execution_results,
-                                                                                  task.input_output_examples)
-                logger.debug(
-                    f"[evaluate_program] _assess_correctness for {program.id} -> correctness: {correctness}, passed: {passed_tests}, total: {total_tests}")
-                program.fitness_scores["correctness"] = correctness
-                program.fitness_scores["passed_tests"] = float(passed_tests)
-                # program.fitness_scores["total_tests"] already set from default_scores
-                if "average_runtime_ms" in execution_results and correctness > 0:
-                    program.fitness_scores["runtime_ms"] = execution_results["average_runtime_ms"]
+                    f"[evaluate_program] Starting functional evaluation for {program.id} against {len(task.input_output_examples)} test cases.")
+                execution_results, execution_error = await self._execute_code_safely(program.code,
+                                                                                     task_for_examples=task)
 
-                if correctness < 1.0 and not execution_error:  # Don't double-log if execution_error already captured it
-                    program.errors.append(f"Failed {total_tests - passed_tests} out of {total_tests} I/O test cases.")
-                    if not program.status == "evaluating":  # If not already set to a more specific failure
-                        program.status = "failed_evaluation_tests"
-            else:  # execution_results is None or malformed, and no execution_error string
+                if execution_error:
+                    logger.warning(f"[evaluate_program] Execution error for {program.id}: {execution_error}")
+                    program.errors.append(f"Execution Error: {execution_error}")
+                    program.fitness_scores["correctness"] = 0.0
+                    program.status = "failed_evaluation_execution"
+                elif execution_results and "test_outputs" in execution_results:
+                    logger.debug(
+                        f"[evaluate_program] Execution results for {program.id} (first 200 chars of test_outputs): {str(execution_results.get('test_outputs'))[:200]}")
+                    correctness, passed_tests, total_tests = self._assess_correctness(execution_results,
+                                                                                      task.input_output_examples)
+
+                    program.fitness_scores["correctness"] = correctness
+                    program.fitness_scores["passed_tests"] = float(passed_tests)
+                    # program.fitness_scores["total_tests"] is already set from default_scores
+
+                    # Update runtime only if it was successful and correctness is > 0 (or based on your criteria)
+                    avg_runtime = execution_results.get("average_runtime_ms")
+                    if avg_runtime is not None and correctness > 0:  # type: ignore
+                        program.fitness_scores["runtime_ms"] = avg_runtime  # type: ignore
+                    elif avg_runtime is not None:  # It ran, but wasn't correct
+                        program.fitness_scores["runtime_ms"] = avg_runtime  # type: ignore # Still record runtime
+                    else:  # avg_runtime is None (shouldn't happen if execution_results is well-formed)
+                        program.fitness_scores["runtime_ms"] = float('inf')
+
+                    if correctness < 1.0:  # No need for "and not execution_error" as that's a separate path
+                        program.errors.append(
+                            f"Failed {int(total_tests - passed_tests)} out of {int(total_tests)} I/O test cases.")
+                        # Don't override a more specific failure status like failed_evaluation_execution
+                        if program.status == "evaluating":
+                            program.status = "failed_evaluation_tests"
+                else:  # execution_results is None or malformed, and no execution_error string
+                    logger.warning(
+                        f"[evaluate_program] Execution of {program.id} yielded no results or malformed results from _execute_code_safely. Raw results: {str(execution_results)[:200]}")
+                    program.errors.append("Execution Error: Unknown issue or malformed results from sandbox.")
+                    program.fitness_scores["correctness"] = 0.0
+                    if program.status == "evaluating":
+                        program.status = "failed_evaluation_unknown_exec"
+
+            elif task.improvement_mode == "task_focused" and not task.input_output_examples:
                 logger.warning(
-                    f"[evaluate_program] Execution of {program.id} yielded no results or malformed results, and no specific error message from _execute_code_safely. Raw results: {str(execution_results)[:200]}")
-                program.errors.append("Execution Error: Unknown issue or malformed results from sandbox.")
-                program.fitness_scores["correctness"] = 0.0
-                program.status = "failed_evaluation_unknown_exec"
+                    f"[evaluate_program] Task {task.id} is 'task_focused' but has no I/O examples. Cannot assess correctness.")
+                program.errors.append("Evaluation: Task 'task_focused' but no I/O examples.")
+                if not program.errors and program.status == "evaluating":  # Only set if no other errors
+                    program.status = "evaluated_no_tests"
 
-        elif task.improvement_mode == "task_focused" and not task.input_output_examples:
-            logger.warning(
-                f"[evaluate_program] Task {task.id} is 'task_focused' but has no I/O examples. Cannot assess correctness.")
-            program.errors.append("Evaluation: Task 'task_focused' but no I/O examples.")
-            # Status remains 'evaluating' or 'failed_evaluation_syntax' if that happened.
-            # If no errors so far, it's technically evaluated but without correctness.
-            if not program.errors: program.status = "evaluated_no_tests"
+            # 4. Final status determination
+            if not program.errors and program.status == "evaluating":
+                program.status = "evaluated"
+            elif program.errors and program.status == "evaluating":  # Errors were added, but status not specifically set to a failure type
+                program.status = "failed_evaluation_generic"  # A generic failure if specific one not set
 
-        # Final status determination
-        if not program.errors and program.status == "evaluating":  # If it made it through without errors
-            program.status = "evaluated"
-        elif program.errors and program.status == "evaluating":  # If errors were added but status not specifically set to a failure type
-            program.status = "failed_evaluation_generic"
+        except Exception as e_evaluate_program:  # Catch-all for unexpected errors within the try block
+            logger.error(
+                f"[evaluate_program] CRITICAL unhandled exception during evaluation of {program.id}: {e_evaluate_program}",
+                exc_info=True)
+            program.errors.append(
+                f"Critical Evaluation Error: {type(e_evaluate_program).__name__} - {str(e_evaluate_program)}")
+            program.status = "failed_evaluation_internal_critical"
+            # Ensure all fitness scores reflect failure
+            for key in program.fitness_scores:
+                if key == "ruff_violations":
+                    program.fitness_scores[key] = float('inf')
+                elif key == "runtime_ms":
+                    program.fitness_scores[key] = float('inf')
+                elif key == "correctness":
+                    program.fitness_scores[key] = 0.0
+                # Add other metrics as needed
 
-        logger.debug(
-            f"[evaluate_program] FINALIZING for {program.id}. Status: {program.status}. Fitness: {program.fitness_scores}. Errors: {program.errors}. About to return program object.")
+        finally:  # Ensure temporary file is always cleaned up if it was created
+            if temp_code_file_path and os.path.exists(temp_code_file_path):
+                try:
+                    os.remove(temp_code_file_path)
+                    logger.debug(f"[evaluate_program] Cleaned up temp static analysis file: {temp_code_file_path}")
+                except Exception as e_cleanup:
+                    logger.error(f"Error during cleanup of temp file {temp_code_file_path}: {e_cleanup}")
+
+        logger.info(
+            f"[evaluate_program] FINALIZED for Program ID: {program.id}. "
+            f"Status: {program.status}. "
+            f"Correctness: {program.fitness_scores.get('correctness', 0.0) * 100:.1f}%, "
+            f"Ruff Violations: {program.fitness_scores.get('ruff_violations', 'N/A')}, "
+            f"Runtime: {program.fitness_scores.get('runtime_ms', 'N/A'):.2f}ms. "
+            f"Errors: {len(program.errors)}"
+        )
+        logger.debug(f"Full fitness scores for {program.id}: {program.fitness_scores}")
+        if program.errors:
+            logger.debug(f"Detailed errors for {program.id}: {program.errors}")
+
         return program
 
     # MODIFIED execute method:

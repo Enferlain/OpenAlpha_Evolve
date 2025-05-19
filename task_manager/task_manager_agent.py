@@ -2,7 +2,7 @@ import logging
 import asyncio
 import random
 import time # For timing generations and total run
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 
 from core.interfaces import (
     TaskManagerInterface, TaskDefinition, Program, BaseAgent,
@@ -165,58 +165,66 @@ class TaskManagerAgent(TaskManagerInterface):
             f"Initialized population with {len(initial_population)} programs. Their creation_methods are now set!")
         return initial_population
 
-    def _calculate_population_metrics(self, population: List[Program]) -> Dict[str, Any]:  # Method_v1.0.0 (New helper)
-        """Calculates summary statistics for a population."""
+    # --- MODIFIED: _calculate_population_metrics (v1.1.0 for Ruff, as provided before) ---
+    def _calculate_population_metrics(self, population: List[Program]) -> Dict[str, Any]: # Method_v1.1.0
+        """Calculates summary statistics for a population, now for Ruff."""
         if not population:
             return {
                 "avg_correctness": 0.0, "best_correctness": 0.0,
-                "avg_pylint_score": 0.0, "best_pylint_score": 0.0,
+                "avg_ruff_violations": float('inf'), "min_ruff_violations": float('inf'), # Ruff init
                 "avg_runtime_ms": float('inf'), "best_runtime_ms": float('inf'),
                 "avg_cyclomatic_complexity": float('inf'), "best_cyclomatic_complexity": float('inf'),
-                "avg_maintainability_index": 0.0, "best_maintainability_index": 0.0,
+                "avg_maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", 0.0), # Use default from settings
+                "best_maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", 0.0),
             }
 
-        metrics = {
-            "correctness": [], "pylint_score": [], "runtime_ms": [],
-            "cyclomatic_complexity_avg": [], "maintainability_index": []
+        metrics_data = { # Renamed from 'metrics' to 'metrics_data' to avoid conflict if a metric is named 'metrics'
+            "correctness": [],
+            "ruff_violations": [],
+            "runtime_ms": [],
+            "cyclomatic_complexity_avg": [],
+            "maintainability_index": []
         }
 
-        for prog in population:
-            if prog.status == "evaluated":  # Only consider evaluated programs for metrics
-                metrics["correctness"].append(prog.fitness_scores.get("correctness", 0.0))
-                metrics["pylint_score"].append(
-                    prog.fitness_scores.get("pylint_score", settings.DEFAULT_METRIC_VALUE.get("pylint_score", -1.0)))
-                metrics["runtime_ms"].append(prog.fitness_scores.get("runtime_ms", float('inf')))
-                metrics["cyclomatic_complexity_avg"].append(
-                    prog.fitness_scores.get("cyclomatic_complexity_avg", float('inf')))
-                metrics["maintainability_index"].append(prog.fitness_scores.get("maintainability_index",
-                                                                                settings.DEFAULT_METRIC_VALUE.get(
-                                                                                    "maintainability_index", -1.0)))
+        evaluated_programs = [p for p in population if p.status == "evaluated" and p.fitness_scores]
 
-        # Helper to safely calculate avg/min/max
-        def safe_avg(values, default=0.0):
-            valid_values = [v for v in values if v is not None and v != float('inf') and v != float('-inf')]
-            return sum(valid_values) / len(valid_values) if valid_values else default
+        for prog in evaluated_programs:
+            metrics_data["correctness"].append(prog.fitness_scores.get("correctness", 0.0))
+            metrics_data["ruff_violations"].append(prog.fitness_scores.get("ruff_violations", float('inf')))
+            metrics_data["runtime_ms"].append(prog.fitness_scores.get("runtime_ms", float('inf')))
+            metrics_data["cyclomatic_complexity_avg"].append(
+                prog.fitness_scores.get("cyclomatic_complexity_avg", float('inf')))
+            metrics_data["maintainability_index"].append(prog.fitness_scores.get("maintainability_index",
+                                                                            settings.DEFAULT_METRIC_VALUE.get("maintainability_index", 0.0)))
 
-        def safe_min(values, default=float('inf')):  # For "lower is better" metrics
-            valid_values = [v for v in values if v is not None]
-            return min(valid_values) if valid_values else default
+        def safe_avg(values: List[Union[float, int]], default_val=0.0) -> float: # Type hint for values
+            valid_values = [v for v in values if isinstance(v, (int, float)) and v != float('inf') and v != float('-inf') and not (isinstance(v, float) and v != v)]
+            return sum(valid_values) / len(valid_values) if valid_values else default_val
 
-        def safe_max(values, default=0.0):  # For "higher is better" metrics
-            valid_values = [v for v in values if v is not None]
-            return max(valid_values) if valid_values else default
+        def safe_min(values: List[Union[float, int]], default_val=float('inf')) -> float:
+            valid_values = [v for v in values if isinstance(v, (int, float)) and not (isinstance(v, float) and v != v)] # Exclude NaN, keep inf unless default needed
+            if not valid_values: return default_val
+            return min(valid_values) if any(v != float('inf') for v in valid_values) else default_val
+
+
+        def safe_max(values: List[Union[float, int]], default_val=0.0) -> float:
+            valid_values = [v for v in values if isinstance(v, (int, float)) and v != float('-inf') and not (isinstance(v, float) and v != v)] # Exclude NaN, keep -inf unless default needed
+            if not valid_values: return default_val
+            # If all are float('-inf'), max will be float('-inf'). If list is empty, default_val.
+            return max(valid_values) if any(v != float('-inf') for v in valid_values) else default_val
+
 
         summary = {
-            "avg_correctness": safe_avg(metrics["correctness"]),
-            "best_correctness": safe_max(metrics["correctness"]),
-            "avg_pylint_score": safe_avg(metrics["pylint_score"]),
-            "best_pylint_score": safe_max(metrics["pylint_score"], default=-10.0),  # Pylint can be negative
-            "avg_runtime_ms": safe_avg(metrics["runtime_ms"], default=float('inf')),
-            "best_runtime_ms": safe_min(metrics["runtime_ms"]),
-            "avg_cyclomatic_complexity": safe_avg(metrics["cyclomatic_complexity_avg"], default=float('inf')),
-            "best_cyclomatic_complexity": safe_min(metrics["cyclomatic_complexity_avg"]),
-            "avg_maintainability_index": safe_avg(metrics["maintainability_index"]),
-            "best_maintainability_index": safe_max(metrics["maintainability_index"]),
+            "avg_correctness": safe_avg(metrics_data["correctness"]),
+            "best_correctness": safe_max(metrics_data["correctness"]),
+            "avg_ruff_violations": safe_avg(metrics_data["ruff_violations"], default_val=float('inf')),
+            "min_ruff_violations": safe_min(metrics_data["ruff_violations"]), # Min violations is best
+            "avg_runtime_ms": safe_avg(metrics_data["runtime_ms"], default_val=float('inf')),
+            "best_runtime_ms": safe_min(metrics_data["runtime_ms"]),
+            "avg_cyclomatic_complexity": safe_avg(metrics_data["cyclomatic_complexity_avg"], default_val=float('inf')),
+            "best_cyclomatic_complexity": safe_min(metrics_data["cyclomatic_complexity_avg"]),
+            "avg_maintainability_index": safe_avg(metrics_data["maintainability_index"], default_val=settings.DEFAULT_METRIC_VALUE.get("maintainability_index", 0.0)),
+            "best_maintainability_index": safe_max(metrics_data["maintainability_index"], default_val=settings.DEFAULT_METRIC_VALUE.get("maintainability_index", 0.0)),
         }
         return summary
 
@@ -296,7 +304,7 @@ class TaskManagerAgent(TaskManagerInterface):
         logger.info(f"Finished evaluating. Total programs processed/retained: {len(final_evaluated_population)}.")
         return final_evaluated_population
 
-    async def manage_evolutionary_cycle(self) -> List[Program]:  # Method_v6 (with LLM Call Count Monitoring)
+    async def manage_evolutionary_cycle(self) -> List[Program]:  # Method_v6.1 (minor logging for total API calls)
         logger.info(
             f"Starting evolutionary cycle for task: {self.task_definition.id} (Mode: {self.task_definition.improvement_mode})")
         self.start_time_overall_run = time.monotonic()
@@ -311,113 +319,83 @@ class TaskManagerAgent(TaskManagerInterface):
             start_time_generation = time.monotonic()
             if hasattr(self.code_generator, 'reset_api_call_count_generation'):
                 self.code_generator.reset_api_call_count_generation()
-
             logger.info(f"--- Generation {gen}/{self.num_generations} ---")
 
-            parents = self.selection_controller.select_parents(
-                current_population, self.num_parents_to_select, self.task_definition
-            )
+            parents = self.selection_controller.select_parents(current_population, self.num_parents_to_select,
+                                                               self.task_definition)
             if not parents:
                 logger.warning(f"Generation {gen}: No parents selected. Ending evolution early.")
                 break
-            logger.info(f"Generation {gen}: Selected {len(parents)} parents for reproduction.")
 
             offspring_population: List[Program] = []
-            num_offspring_to_generate = self.population_size
-            num_newly_generated_offspring = 0  # Initialize counter for successfully generated offspring
-
+            num_newly_generated_offspring = 0
             generation_tasks = []
-            for i in range(num_offspring_to_generate):
+            for i in range(self.population_size):  # Assuming we generate population_size new offspring
+                child_id_base = f"{self.task_definition.id}_gen{gen}"
                 if len(parents) >= self.min_parents_for_crossover and random.random() < self.crossover_rate:
-                    if len(parents) < 2:  # Ensure enough parents for sampling
-                        logger.debug("Not enough parents for crossover, defaulting to mutation for this offspring.")
-                        parent_for_mutation = random.choice(parents)  # Should not happen if initial check passes
-                        child_id = f"{self.task_definition.id}_gen{gen}_mut{i}"
-                        generation_tasks.append(self.generate_offspring(parent_for_mutation, gen, child_id))
+                    if len(parents) < 2:  # Should not happen if num_parents_to_select >= 2 for crossover
+                        p1 = random.choice(parents)
+                        generation_tasks.append(self.generate_offspring(p1, gen, f"{child_id_base}_mut{i}"))
                     else:
                         p1, p2 = random.sample(parents, 2)
-                        child_id = f"{self.task_definition.id}_gen{gen}_cross{i}"
-                        generation_tasks.append(self.generate_crossover_offspring(p1, p2, gen, child_id))
+                        generation_tasks.append(
+                            self.generate_crossover_offspring(p1, p2, gen, f"{child_id_base}_cross{i}"))
                 else:
-                    parent_for_mutation = random.choice(parents)
-                    child_id = f"{self.task_definition.id}_gen{gen}_mut{i}"
-                    generation_tasks.append(self.generate_offspring(parent_for_mutation, gen, child_id))
+                    p1 = random.choice(parents)
+                    generation_tasks.append(self.generate_offspring(p1, gen, f"{child_id_base}_mut{i}"))
 
             if generation_tasks:
                 generated_results = await asyncio.gather(*generation_tasks, return_exceptions=True)
                 for result in generated_results:
                     if isinstance(result, Program):
                         offspring_population.append(result)
-                        await self.database.save_program(result)
-                        num_newly_generated_offspring += 1  # Increment for successful offspring
+                        await self.database.save_program(result)  # Save offspring before evaluation
+                        num_newly_generated_offspring += 1
                     elif isinstance(result, Exception):
                         logger.error(f"Error during offspring generation task: {result}", exc_info=result)
-
-            logger.info(f"Generation {gen}: Generated {num_newly_generated_offspring} new offspring candidates.")
 
             if offspring_population:
                 offspring_population = await self.evaluate_population(offspring_population)
 
-            current_population = self.selection_controller.select_survivors(
-                current_population, offspring_population, self.population_size, self.task_definition
-            )
-            logger.info(f"Generation {gen}: New population size after survival: {len(current_population)}.")
+            current_population = self.selection_controller.select_survivors(current_population, offspring_population,
+                                                                            self.population_size, self.task_definition)
 
-            # Log best program of this generation using SelectionController's sorting
+            # Log best program of this generation
             if current_population:
                 sorted_for_log = self.selection_controller.sort_programs(current_population, self.task_definition)
-                if sorted_for_log:
-                    best_program_this_gen = sorted_for_log[0]
-                    logger.info(
-                        f"Generation {gen}: Best program in new pop: ID={best_program_this_gen.id}, Fitness={best_program_this_gen.fitness_scores}")
-                else:
-                    logger.warning(f"Generation {gen}: Sorting the current population for logging yielded no results.")
+                if sorted_for_log: logger.info(
+                    f"Generation {gen}: Best program in new pop: ID={sorted_for_log[0].id}, Fitness={sorted_for_log[0].fitness_scores}")
 
-            # --- Monitoring Step for this Generation ---
             generation_time_sec = time.monotonic() - start_time_generation
-            population_metrics = self._calculate_population_metrics(current_population)  # Helper method to compute stats
-
-            llm_calls_this_generation = 0
-            if hasattr(self.code_generator, 'get_api_call_count_generation'):
-                llm_calls_this_generation = self.code_generator.get_api_call_count_generation()
+            population_metrics = self._calculate_population_metrics(current_population)  # This now has Ruff metrics
+            llm_calls_this_generation = self.code_generator.get_api_call_count_generation() if hasattr(
+                self.code_generator, 'get_api_call_count_generation') else 0
 
             generation_log_data = {
-                "task_id": self.task_definition.id,
-                "generation_number": gen,
-                "population_size": len(current_population),
-                "num_offspring_generated": num_newly_generated_offspring,
-                **population_metrics,
-                "generation_time_sec": round(generation_time_sec, 2),
+                "task_id": self.task_definition.id, "generation_number": gen,
+                "population_size": len(current_population), "num_offspring_generated": num_newly_generated_offspring,
+                **population_metrics, "generation_time_sec": round(generation_time_sec, 2),
                 "llm_api_calls_generation": llm_calls_this_generation
             }
             await self.monitoring_agent.execute("log_generation_metrics", payload=generation_log_data)
-            # --- End Monitoring Step ---
 
-            if not current_population:
-                logger.warning(f"Generation {gen}: No programs in current population. Ending evolution.")
-                break
+            if not current_population: logger.warning(
+                f"Generation {gen}: No programs in current population. Ending evolution."); break
 
         logger.info("Evolutionary cycle completed.")
-        total_run_time_sec = time.monotonic() - self.start_time_overall_run
+        total_run_time_sec = time.monotonic() - (
+            self.start_time_overall_run if self.start_time_overall_run else time.monotonic())
+        total_api_calls_session = self.code_generator.get_api_call_count_session() if hasattr(self.code_generator,
+                                                                                              'get_api_call_count_session') else 0
 
-        best_program_list = await self._get_overall_best_program()  # Helper that uses selection_controller.sort_programs
+        best_program_list = await self._get_overall_best_program()
         best_overall_program_obj = best_program_list[0] if best_program_list else None
 
-        total_api_calls_session = 0
-        if hasattr(self.code_generator, 'get_api_call_count_session'):
-            total_api_calls_session = self.code_generator.get_api_call_count_session()
-        logger.info(f"Total LLM API calls for this session: {total_api_calls_session}")
-
         final_summary_payload = {
-            "best_program_overall": best_overall_program_obj,
-            "total_runtime_sec": round(total_run_time_sec, 2),
-            "task_id": self.task_definition.id,
-            "total_llm_api_calls_session": total_api_calls_session
+            "best_program_overall": best_overall_program_obj, "total_runtime_sec": round(total_run_time_sec, 2),
+            "task_id": self.task_definition.id, "total_llm_api_calls_session": total_api_calls_session
         }
-        # Also add this to the MonitoringAgent's final log if desired (e.g. to metrics file)
-        # For now, log_final_summary in MonitoringAgent primarily logs to console.
         await self.monitoring_agent.execute("log_final_summary", payload=final_summary_payload)
-
         return best_program_list
 
     async def generate_crossover_offspring(self, parent1: Program, parent2: Program, generation_num: int,
@@ -455,94 +433,86 @@ class TaskManagerAgent(TaskManagerInterface):
         logger.info(f"Successfully generated crossover offspring {offspring.id}.")
         return offspring
 
+    # generate_offspring method (for mutation/bug_fix) needs to use the updated _get_ancestral_summary_for_llm
+    # The call to self.prompt_designer.design_mutation_prompt / design_bug_fix_prompt will use the
+    # version of PromptDesignerAgent that correctly formats Ruff feedback from program.errors.
     async def generate_offspring(self, parent: Program, generation_num: int, child_id: str) -> Optional[
-        Program]:  # Method_v4 (with Ancestral History and Diff Fallback)
-        logger.debug(
-            f"Generating mutation/bug_fix offspring {child_id} from parent {parent.id} for gen {generation_num}")
-
-        # Fetch ancestral summary to pass to the prompt designer
-        ancestral_summary_for_prompt = await self._get_ancestral_summary_for_llm(parent,
-                                                                                 max_depth=3)  # Use the new helper
+        Program]:  # Method_v4.1 (Uses updated ancestral summary)
+        logger.debug(f"Generating mutation/bug_fix offspring {child_id} from parent {parent.id}")
+        ancestral_summary = await self._get_ancestral_summary_for_llm(parent,
+                                                                      max_depth=3)  # This now includes Ruff info
 
         mutation_prompt_str: str = ""
         prompt_type: str = "mutation"
-        parent_feedback_cleaned = {
-            "correctness": parent.fitness_scores.get("correctness"),
-            "runtime_ms": parent.fitness_scores.get("runtime_ms"),
-            "pylint_score": parent.fitness_scores.get("pylint_score"),
-            "cyclomatic_complexity_avg": parent.fitness_scores.get("cyclomatic_complexity_avg"),
-            "maintainability_index": parent.fitness_scores.get("maintainability_index"),
-            "passed_tests": parent.fitness_scores.get("passed_tests"),
-            "total_tests": parent.fitness_scores.get("total_tests"),
-            "errors": parent.errors,
-        }
-        parent_feedback_for_prompt = {k: v for k, v in parent_feedback_cleaned.items() if
-                                      v is not None or k == "errors"}
+        # The parent_program object passed to PromptDesigner will have .errors populated by EvaluatorAgent with Ruff messages
         original_attempt_summary_for_fallback = ""
 
-        if parent.errors and parent.fitness_scores.get("correctness", 1.0) < 0.1:
-            primary_error = parent.errors[0]
+        # Decide if bug_fix or mutation based on correctness and errors
+        # Errors from Ruff are in parent.errors, execution errors also.
+        # If primary error is an execution error and correctness is low:
+        is_execution_error_dominant = any(not err.lower().startswith("ruff-") for err in parent.errors)
+
+        if parent.errors and parent.fitness_scores.get("correctness", 1.0) < 0.1 and is_execution_error_dominant:
+            primary_error = next((e for e in parent.errors if not e.lower().startswith("ruff-")), parent.errors[0])
             mutation_prompt_str = self.prompt_designer.design_bug_fix_prompt(
                 task=self.task_definition, program=parent, error_message=primary_error,
-                execution_output=None, ancestral_summary=ancestral_summary_for_prompt  # <-- Pass history
+                execution_output=None,  # Provide if available
+                ancestral_summary=ancestral_summary
             )
             prompt_type = "bug_fix"
-            original_attempt_summary_for_fallback = f"Fix the bug causing error: '{primary_error}' in the provided code, considering the task: {self.task_definition.description}"
+            original_attempt_summary_for_fallback = f"Fix bug: '{primary_error}' for task: {self.task_definition.description}"
         else:
+            # For mutation, evaluation_feedback arg to design_mutation_prompt is less critical
+            # if parent program object itself is up-to-date with .fitness_scores and .errors
             mutation_prompt_str = self.prompt_designer.design_mutation_prompt(
                 task=self.task_definition, parent_program=parent,
-                evaluation_feedback=parent_feedback_for_prompt,
-                ancestral_summary=ancestral_summary_for_prompt  # <-- Pass history
+                evaluation_feedback=parent.fitness_scores,  # Pass fitness scores, PromptDesigner can pick what it needs
+                ancestral_summary=ancestral_summary
             )
             prompt_type = "mutation"
-            original_attempt_summary_for_fallback = f"Improve the code based on its evaluation feedback and the general task: {self.task_definition.description}. Refinement mode: {self.task_definition.improvement_mode}."
+            original_attempt_summary_for_fallback = f"Improve code for task: {self.task_definition.description}, mode: {self.task_definition.improvement_mode}"
 
-        logger.info(f"Attempting {prompt_type} for offspring {child_id} using diff format.")
-        final_code = await self.code_generator.execute(
-            prompt=mutation_prompt_str, temperature=settings.TEMPERATURE_MUTATION_DIFF, output_format="diff", parent_code_for_diff=parent.code
-        )
+        final_code = ""
+        async with self._api_call_semaphore:  # API call rate limiting for diff attempt
+            current_time = time.monotonic()
+            if current_time - self._last_api_call_release_time < MIN_SECONDS_BETWEEN_CALLS:
+                await asyncio.sleep(MIN_SECONDS_BETWEEN_CALLS - (current_time - self._last_api_call_release_time))
+            final_code = await self.code_generator.execute(
+                prompt=mutation_prompt_str, temperature=settings.TEMPERATURE_MUTATION_DIFF, output_format="diff",
+                parent_code_for_diff=parent.code
+            )
+            self._last_api_call_release_time = time.monotonic()
 
-        diff_failed = False
-        if not final_code.strip() or final_code == parent.code:
-            diff_failed = True
-            logger.warning(
-                f"Diff attempt for offspring {child_id} ({prompt_type}) resulted in no change or empty code.")
-        elif "<<<<<<< SEARCH" in final_code and ">>>>>>> REPLACE" in final_code and len(final_code) < len(
-                parent.code) + 300:  # Increased heuristic length
-            diff_failed = True
-            logger.warning(
-                f"Diff attempt for {child_id} ({prompt_type}) seems to have returned raw diff text. Diff application likely failed.")
+        diff_failed_heuristic = not final_code.strip() or final_code == parent.code or \
+                                ("<<<<<<< SEARCH" in final_code and ">>>>>>> REPLACE" in final_code and len(
+                                    final_code) < len(parent.code) + 300)
 
-        if diff_failed:
-            logger.info(f"Diff application failed for {child_id}. Attempting fallback to full code regeneration.")
-            creation_method_tag = prompt_type  # Store original attempt type
+        if diff_failed_heuristic:
+            logger.warning(f"Diff attempt for {child_id} ({prompt_type}) failed or no change. Trying fallback.")
+            prompt_type_original = prompt_type
             prompt_type += "_fallback_full"
-
             fallback_prompt = self.prompt_designer.design_failed_diff_fallback_prompt(
                 task=self.task_definition, original_program=parent,
                 previous_attempt_summary=original_attempt_summary_for_fallback,
-                ancestral_summary=ancestral_summary_for_prompt  # <-- Pass history to fallback prompt too!
+                ancestral_summary=ancestral_summary
             )
+            async with self._api_call_semaphore:  # API call rate limiting for fallback
+                current_time = time.monotonic()
+                if current_time - self._last_api_call_release_time < MIN_SECONDS_BETWEEN_CALLS:
+                    await asyncio.sleep(MIN_SECONDS_BETWEEN_CALLS - (current_time - self._last_api_call_release_time))
+                final_code = await self.code_generator.execute(
+                    prompt=fallback_prompt, temperature=settings.TEMPERATURE_FALLBACK_FULL, output_format="code"
+                )
+                self._last_api_call_release_time = time.monotonic()
 
-            final_code = await self.code_generator.execute(
-                prompt=fallback_prompt, temperature=settings.TEMPERATURE_FALLBACK_FULL, output_format="code"
-            )
-
-            if not final_code.strip():
-                logger.warning(f"Fallback full code generation for {child_id} also resulted in EMPTY code. Skipping.")
+            if not final_code.strip() or final_code == parent.code:
+                logger.warning(
+                    f"Fallback full code generation for {child_id} ({prompt_type_original}) also empty or no change. Skipping.")
                 return None
-            if final_code == parent.code:
-                logger.warning(f"Fallback full code generation for {child_id} resulted in NO CHANGE. Skipping.")
-                return None
-            logger.info(
-                f"Successfully generated full code for {child_id} via fallback from original attempt '{creation_method_tag}'.")
 
-        offspring = Program(
-            id=child_id, code=final_code, generation=generation_num, parent_id=parent.id,
-            parent_ids=[parent.id] if parent.id else [], status="unevaluated",
-            task_id=self.task_definition.id, creation_method=prompt_type
-        )
-        logger.info(f"Successfully generated offspring {offspring.id} (Method: {prompt_type}).")
+        offspring = Program(id=child_id, code=final_code, generation=generation_num, parent_id=parent.id,
+                            parent_ids=[parent.id] if parent.id else [], status="unevaluated",
+                            task_id=self.task_definition.id, creation_method=prompt_type)
         return offspring
 
     async def _get_overall_best_program(self) -> List[Program]:  # Helper method extracted
@@ -569,63 +539,52 @@ class TaskManagerAgent(TaskManagerInterface):
         # logger.info(f"Code:\n{best_overall_program.code}")
         return [best_overall_program]
 
+    # --- MODIFIED: _get_ancestral_summary_for_llm (v1.1.0 for Ruff) ---
     async def _get_ancestral_summary_for_llm(self, program: Program, max_depth: int = 3) -> List[
-        Dict[str, Any]]:  # Method_v1.0.0 (New helper for LLM history)
+        Dict[str, Any]]:  # Method_v1.1.0
         """
         Retrieves a concise summary of a program's recent ancestors for LLM prompting.
-        Returns a list of dictionaries, with the oldest relevant ancestor first.
+        Includes Ruff violation counts in the outcome summary.
         """
         logger.debug(f"Fetching ancestral summary for program {program.id}, max_depth={max_depth}.")
         history_summary = []
         current_prog_in_history = program
-        # Keep track of processed IDs to prevent loops, though our linear parent_id shouldn't cause them.
         processed_ids = {program.id}
 
-        for i in range(max_depth):
-            parent_ref_id = None
-            # For simplicity, we trace a single line of ancestry.
-            # If a program came from crossover, we'll pick the first parent listed in parent_ids.
-            if current_prog_in_history.parent_id:
-                parent_ref_id = current_prog_in_history.parent_id
-            elif current_prog_in_history.parent_ids and len(current_prog_in_history.parent_ids) > 0:
-                parent_ref_id = current_prog_in_history.parent_ids[0]
+        for _ in range(max_depth):
+            parent_ref_id = current_prog_in_history.parent_id or \
+                            (current_prog_in_history.parent_ids[0] if current_prog_in_history.parent_ids else None)
 
             if not parent_ref_id or parent_ref_id in processed_ids:
-                logger.debug(
-                    f"Stopping ancestral search for {program.id}: no more valid parent_ref_id ({parent_ref_id}) or already processed.")
                 break
 
             parent = await self.database.get_program(parent_ref_id)
             if not parent:
-                logger.warning(
-                    f"Could not retrieve parent {parent_ref_id} for ancestral history of {program.id}. Stopping history trace here.")
+                logger.warning(f"Could not retrieve parent {parent_ref_id} for ancestral history of {program.id}.")
                 break
 
             processed_ids.add(parent.id)
 
-            # Create a concise summary for the LLM
             outcome_parts = []
             if parent.fitness_scores.get("correctness") is not None:
                 outcome_parts.append(f"Correctness: {parent.fitness_scores['correctness'] * 100:.0f}%")
-            if parent.fitness_scores.get("pylint_score") is not None:  # Assuming pylint_score is a float
-                p_score = parent.fitness_scores['pylint_score']
-                outcome_parts.append(
-                    f"Pylint: {p_score:.1f}/10" if isinstance(p_score, float) else f"Pylint: {p_score}")
 
+            ruff_v = parent.fitness_scores.get("ruff_violations")
+            if ruff_v is not None and ruff_v != float('inf'):
+                outcome_parts.append(f"Ruff Violations: {int(ruff_v)}")
+
+            # Summarize errors briefly
             error_summary_text = ""
             if parent.errors:
-                first_error_str = str(parent.errors[0])
-                if "failed" in first_error_str.lower() and (
-                        "test" in first_error_str.lower() or "i/o" in first_error_str.lower()):
-                    error_summary_text = " (failed I/O)"
-                elif "syntax" in first_error_str.lower():
-                    error_summary_text = " (syntax err)"
-                else:
-                    error_summary_text = " (had errors)"
+                # Count execution vs Ruff errors if desired, or just indicate "had issues"
+                num_exec_errors = sum(1 for e in parent.errors if not e.lower().startswith("ruff-"))
+                if num_exec_errors > 0 and parent.fitness_scores.get("correctness", 1.0) < 1.0:
+                    error_summary_text = " (failed I/O/exec)"
+                elif parent.errors:  # Any errors left (could be only Ruff)
+                    error_summary_text = " (had static issues)"
 
             outcome_str = ', '.join(outcome_parts) + error_summary_text
-            if not outcome_str.strip():  # Ensure there's some text if no specific scores/errors
-                outcome_str = "Prior version."
+            if not outcome_str.strip(): outcome_str = "Prior version (no specific metrics captured in summary)."
 
             summary_entry = {
                 "generation": parent.generation,
@@ -633,10 +592,10 @@ class TaskManagerAgent(TaskManagerInterface):
                 "outcome_summary": outcome_str
             }
             history_summary.append(summary_entry)
-            current_prog_in_history = parent  # Move to the parent for the next iteration
+            current_prog_in_history = parent
 
         logger.debug(f"Returning {len(history_summary)} ancestral summaries for {program.id}.")
-        return list(reversed(history_summary))  # Oldest relevant ancestor first for readability in prompt
+        return list(reversed(history_summary))
 
-    async def execute(self) -> Any:
+    async def execute(self) -> Any:  # Unchanged
         return await self.manage_evolutionary_cycle()

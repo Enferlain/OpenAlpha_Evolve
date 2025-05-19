@@ -83,12 +83,22 @@ RL_TRAINING_INTERVAL_GENERATIONS = 50 # Fine-tune RL model every N generations
 RL_MODEL_PATH = "rl_finetuner_model.pth"
 
 METRIC_OPTIMIZATION_DIRECTION = {
-    "correctness": True, "pylint_score": True, "maintainability_index": True,
-    "passed_tests": True, "runtime_ms": False, "cyclomatic_complexity_avg": False,
+    "correctness": True,  # Higher is better
+    # "pylint_score": True, # Removed Pylint
+    "ruff_violations": False, # Lower is better!
+    "maintainability_index": True,
+    "passed_tests": True,
+    "runtime_ms": False,  # Lower is better
+    "cyclomatic_complexity_avg": False, # Lower is better
 }
 DEFAULT_METRIC_VALUE = {
-    "correctness": 0.0, "pylint_score": -1.0, "maintainability_index": -1.0,
-    "passed_tests": 0.0, "runtime_ms": float('inf'), "cyclomatic_complexity_avg": float('inf'),
+    "correctness": 0.0,
+    # "pylint_score": -1.0, # Removed Pylint
+    "ruff_violations": float('inf'), # Default to very bad
+    "maintainability_index": -1.0,
+    "passed_tests": 0.0,
+    "runtime_ms": float('inf'),
+    "cyclomatic_complexity_avg": float('inf'),
 }
 
 # Monitoring (if implemented)
