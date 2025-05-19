@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import os
 import ast
+import copy
 import re
 import json
 import asyncio
@@ -30,14 +31,18 @@ class EvaluatorAgent(EvaluatorAgentInterface):
             logger.info(f"EvaluatorAgent task_definition: {self.task_definition.id} (Mode: {self.task_definition.improvement_mode})")
         logger.debug(f"EvaluatorAgent instance created. Task ID: {self.task_definition.id if self.task_definition else 'None'}")
 
-    def _check_syntax(self, code: str) -> List[str]: # Unchanged
+    def _check_syntax(self, code: str) -> List[str]:
+        logger.debug(f"[_check_syntax] Checking syntax for code (first 100 chars): {code[:100].replace(chr(10), '<NL>')}") # <NL> for newlines
         errors = []
         try:
             ast.parse(code)
+            logger.debug(f"[_check_syntax] Syntax OK.")
         except SyntaxError as e:
             errors.append(f"SyntaxError: {e.msg} at line {e.lineno}, offset {e.offset}")
+            logger.debug(f"[_check_syntax] SyntaxError found: {errors[-1]}")
         except Exception as e:
             errors.append(f"Unexpected error during syntax check: {str(e)}")
+            logger.debug(f"[_check_syntax] Unexpected syntax check error: {errors[-1]}")
         return errors
 
     async def _execute_code_safely(
@@ -47,8 +52,10 @@ class EvaluatorAgent(EvaluatorAgentInterface):
         timeout_seconds: Optional[int] = None
     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         timeout = timeout_seconds if timeout_seconds is not None else self.evaluation_timeout_seconds
+        logger.debug(f"[_execute_code_safely] Starting for func: {task_for_examples.function_name_to_evolve}, timeout: {timeout}s. Code (first 100): {code[:100].replace(chr(10), '<NL>')}")
+
         results = {"test_outputs": [], "average_runtime_ms": 0.0}
-        
+
         if not task_for_examples.input_output_examples:
             logger.warning("No input/output examples provided to _execute_code_safely.")
             return results, "No test cases to run."
@@ -60,35 +67,70 @@ class EvaluatorAgent(EvaluatorAgentInterface):
         temp_dir = tempfile.mkdtemp()
         temp_file_path = os.path.join(temp_dir, "temp_script.py")
 
-        def serialize_arg(arg):
-            if isinstance(arg, (float, int)) and (arg == float('inf') or arg == float('-inf') or arg != arg):
-                return f"float('{str(arg)}')"
-            return json.dumps(arg)
+        serializable_test_cases = copy.deepcopy(task_for_examples.input_output_examples)
 
-        # Convert input_output_examples to a string with proper Python values for Infinity
-        test_cases_str = json.dumps(task_for_examples.input_output_examples)
-        test_cases_str = test_cases_str.replace('"Infinity"', 'float("inf")')
-        test_cases_str = test_cases_str.replace('"NaN"', 'float("nan")')
+        def prep_for_json(obj):
+            if isinstance(obj, dict):
+                return {str(k): prep_for_json(v) for k, v in obj.items()}  # Stringify keys for top-level graph obj
+            elif isinstance(obj, list):
+                return [prep_for_json(elem) for elem in obj]
+            elif obj == float('inf'):
+                return "Infinity"  # Placeholder string
+            elif obj == float('-inf'):
+                return "-Infinity"  # Placeholder string
+            elif isinstance(obj, float) and obj != obj:  # NaN
+                return "NaN"  # Placeholder string
+            return obj
+
+        # This part is tricky. We want to serialize the graph in a way that the harness can reconstruct it
+        # with integer keys if they were originally integers.
+        # The issue is json.dumps *always* makes keys strings.
+        # So, the HARNESS must do the reconversion.
+
+        # Let's just dump it as is, and let the harness fix the keys if they are graph keys.
+        test_cases_str_for_harness = json.dumps(serializable_test_cases)
+        # The replacements for Infinity/NaN need to be done carefully so they become float('inf') etc. in Python
+        test_cases_str_for_harness = test_cases_str_for_harness.replace('"Infinity"', 'float("inf")')
+        test_cases_str_for_harness = test_cases_str_for_harness.replace('"-Infinity"', 'float("-inf")')
+        test_cases_str_for_harness = test_cases_str_for_harness.replace('"NaN"', 'float("nan")')
 
         test_harness_code = f"""
 import json
 import time
 import sys
-import math  # Import math for inf/nan constants
+import math
 
 # User's code (function to be tested)
 {code}
 
-# Test execution logic
+# --- Helper function to convert string keys back to int if possible ---
+def int_keys_if_possible(obj):
+    if isinstance(obj, dict):
+        new_dict = {{}}
+        for k, v in obj.items():
+            try:
+                # Try to convert key to int. If it's not an int-like string, keep original.
+                # This is a simple heuristic for graph node IDs.
+                # More robust: check if all keys in a specific 'graph' dict are int-like.
+                int_k = int(k)
+                new_dict[int_k] = int_keys_if_possible(v)
+            except ValueError:
+                new_dict[k] = int_keys_if_possible(v) # Keep original key if not int-like
+        return new_dict
+    elif isinstance(obj, list):
+        return [int_keys_if_possible(elem) for elem in obj]
+    return obj
+# --- End Helper ---
+
 results = []
 total_execution_time = 0
 num_tests = 0
 
-# Special constants for test cases
 Infinity = float('inf')
 NaN = float('nan')
 
-test_cases = {test_cases_str} 
+# The test_cases string from json.dumps will have string keys for graphs.
+raw_test_cases = {test_cases_str_for_harness} 
 function_to_test_name = "{task_for_examples.function_name_to_evolve}"
 
 # Make sure the function_to_test is available in the global scope
@@ -110,8 +152,19 @@ if function_to_test_name not in globals():
         
 function_to_test = globals()[function_to_test_name]
 
-for i, test_case in enumerate(test_cases):
-    input_args = test_case.get("input")
+for i, raw_test_case in enumerate(raw_test_cases):
+    # Apply key conversion specifically to the 'graph' part of the input if it exists
+    input_args = raw_test_case.get("input")
+    if isinstance(input_args, dict) and 'graph' in input_args and isinstance(input_args['graph'], dict):
+        # This assumes graph node IDs are the primary things needing int keys.
+        # If other dicts in input_args need int keys, this logic needs adjustment.
+        input_args['graph'] = int_keys_if_possible(input_args['graph'])
+        # Also, if the source_node itself was stringified by an outer layer (unlikely here), it would need int()
+        if 'source_node' in input_args and isinstance(input_args['source_node'], str):
+            try:
+                input_args['source_node'] = int(input_args['source_node'])
+            except ValueError:
+                pass # Keep as string if not int-like
     
     start_time = time.perf_counter()
     try:
@@ -160,12 +213,15 @@ def custom_json_serializer(obj):
     raise TypeError(f"Object of type {{type(obj).__name__}} is not JSON serializable")
 
 print(json.dumps(final_output, default=custom_json_serializer))
-"""
+        """
+        logger.debug(f"[_execute_code_safely] Generated Test Harness Code:\n{test_harness_code}") # LOG THE FULL HARNESS
+
         with open(temp_file_path, "w") as f:
             f.write(test_harness_code)
 
         cmd = [sys.executable, temp_file_path]
-        
+        logger.debug(f"[_execute_code_safely] Generated Test Harness Code (with int_keys_if_possible):\n{test_harness_code}")
+
         proc = None
         try:
             logger.debug(f"Executing code: {' '.join(cmd)} in {temp_dir}")
@@ -182,15 +238,21 @@ print(json.dumps(final_output, default=custom_json_serializer))
 
             stdout_str = stdout.decode('utf-8', errors='replace').strip()
             stderr_str = stderr.decode('utf-8', errors='replace').strip()
+            logger.debug(f"[_execute_code_safely] Subprocess finished. Return Code: {proc.returncode}")
+            logger.debug(f"[_execute_code_safely] STDOUT:\n{stdout_str}") # LOG FULL STDOUT
+            logger.debug(f"[_execute_code_safely] STDERR:\n{stderr_str}") # LOG FULL STDERR
 
             if proc.returncode != 0:
                 error_message = f"Execution failed with exit code {proc.returncode}. Stdout: '{stdout_str}'. Stderr: '{stderr_str}'"
-                logger.warning(error_message)
+                logger.warning(f"[_execute_code_safely] {error_message}")
+                logger.debug(f"[_execute_code_safely] Returning: (None, '{error_message}') due to non-zero exit code.")
                 return None, error_message
             
             if not stdout_str:
-                 logger.warning(f"Execution produced no stdout. Stderr: '{stderr_str}'")
-                 return None, f"No output from script. Stderr: '{stderr_str}'"
+                 error_message = f"No output from script. Stderr: '{stderr_str}'"
+                 logger.warning(f"[_execute_code_safely] {error_message}")
+                 logger.debug(f"[_execute_code_safely] Returning: (None, '{error_message}') due to no stdout.")
+                 return None, error_message
 
             try:
                 def json_loads_with_infinity(s):
@@ -200,11 +262,13 @@ print(json.dumps(final_output, default=custom_json_serializer))
                     return json.loads(s)
 
                 parsed_output = json_loads_with_infinity(stdout_str)
-                logger.debug(f"Parsed execution output: {parsed_output}")
+                logger.debug(f"[_execute_code_safely] Parsed execution output: {parsed_output}")
+                logger.debug(f"[_execute_code_safely] Returning: (parsed_output, None) successfully.")
                 return parsed_output, None
             except json.JSONDecodeError as e:
                 error_message = f"Failed to decode JSON output: {e}. Raw output: '{stdout_str}'"
-                logger.error(error_message)
+                logger.error(f"[_execute_code_safely] {error_message}")
+                logger.debug(f"[_execute_code_safely] Returning: (None, '{error_message}') due to JSONDecodeError.")
                 return None, error_message
             except Exception as e:
                 error_message = f"Error processing script output: {e}. Raw output: '{stdout_str}'"
@@ -220,11 +284,15 @@ print(json.dumps(final_output, default=custom_json_serializer))
                     pass
                 except Exception as e_kill:
                     logger.error(f"Error trying to kill timed-out process: {e_kill}")
-            logger.warning(f"Code execution timed out after {timeout} seconds for function {task_for_examples.function_name_to_evolve}.")
-            return None, f"Execution timed out after {timeout} seconds."
+            error_message = f"Execution timed out after {timeout} seconds."
+            logger.warning(f"[_execute_code_safely] {error_message}")
+            logger.debug(f"[_execute_code_safely] Returning: (None, '{error_message}') due to TimeoutError.")
+            return None, error_message
         except Exception as e:
-            logger.error(f"An unexpected error occurred during code execution: {e}", exc_info=True)
-            return None, f"Unexpected execution error: {str(e)}"
+            error_message = f"Unexpected execution error: {str(e)}"
+            logger.error(f"[_execute_code_safely] An unexpected error occurred: {e}", exc_info=True)
+            logger.debug(f"[_execute_code_safely] Returning: (None, '{error_message}') due to unexpected Exception.")
+            return None, error_message
         finally:
             try:
                 if os.path.exists(temp_file_path):
@@ -233,40 +301,77 @@ print(json.dumps(final_output, default=custom_json_serializer))
                     os.rmdir(temp_dir)
             except Exception as e_cleanup:
                 logger.error(f"Error during cleanup of temp files: {e_cleanup}")
+            logger.debug(f"[_execute_code_safely] Cleanup of temp files attempted for {temp_file_path}")
 
-    def _assess_correctness(self, execution_results: Dict[str, Any], expected_outputs: List[Dict[str, Any]]) -> Tuple[float, int, int]:
+    def _assess_correctness(self, execution_results: Dict[str, Any], expected_outputs: List[Dict[str, Any]]) -> Tuple[
+        float, int, int]:
         passed_tests = 0
         total_tests = len(expected_outputs)
-        
+
         if not execution_results or "test_outputs" not in execution_results:
-            logger.warning("Execution results are missing 'test_outputs' field.")
+            logger.warning("[_assess_correctness] Execution results are missing 'test_outputs' field.")
             return 0.0, 0, total_tests
 
-        actual_test_outputs = execution_results["test_outputs"]
+        actual_test_outputs_from_json = execution_results["test_outputs"]
 
-        if len(actual_test_outputs) != total_tests:
-            logger.warning(f"Mismatch in number of test outputs ({len(actual_test_outputs)}) and expected outputs ({total_tests}). Some tests might have crashed before producing output.")
-        
-        for i, expected in enumerate(expected_outputs):
-            actual_output_detail = next((res for res in actual_test_outputs if res.get("test_case_id") == i), None)
+        if len(actual_test_outputs_from_json) != total_tests:
+            logger.warning(
+                f"[_assess_correctness] Mismatch in number of test outputs ({len(actual_test_outputs_from_json)}) and expected outputs ({total_tests}).")
 
-            if actual_output_detail and actual_output_detail.get("status") == "success":
-                actual = actual_output_detail.get("output")
-                expected_val = expected["output"]
-                
-                if actual == expected_val:
+        for i, expected_case in enumerate(expected_outputs):
+            actual_output_detail_json = next(
+                (res for res in actual_test_outputs_from_json if res.get("test_case_id") == i), None)
+
+            if actual_output_detail_json and actual_output_detail_json.get("status") == "success":
+                actual_output_from_llm_json = actual_output_detail_json.get("output")
+                expected_val_from_yaml = expected_case["output"]  # This has int keys from PyYAML
+
+                # --- NEW: Convert keys of actual_output_from_llm_json to int if they are dicts ---
+                # This assumes the output structure is a flat dictionary (like Dijkstra's output)
+                # or that we only care about the top-level keys if it's nested.
+                # For Dijkstra, the output is Dict[NodeID, Distance].
+
+                processed_actual_output = {}
+                if isinstance(actual_output_from_llm_json, dict):
+                    for k_str, v_val in actual_output_from_llm_json.items():
+                        try:
+                            processed_actual_output[int(k_str)] = v_val
+                        except ValueError:
+                            # If a key cannot be int, it might be a different kind of output, or an error
+                            logger.warning(
+                                f"[_assess_correctness] Test case {i}: Could not convert actual output key '{k_str}' to int. Keeping as string.")
+                            processed_actual_output[k_str] = v_val
+                else:  # If actual output isn't a dict, use it as is (e.g. a single value, list)
+                    processed_actual_output = actual_output_from_llm_json
+                # --- END NEW ---
+
+                # Now compare with integer keys against integer keys
+                if processed_actual_output == expected_val_from_yaml:
                     passed_tests += 1
                 else:
-                    logger.debug(f"Test case {i} failed: Expected '{expected_val}', Got '{actual}'")
-            elif actual_output_detail:
-                logger.debug(f"Test case {i} had error: {actual_output_detail.get('error')}")
-            else:
-                logger.debug(f"Test case {i}: No output found in results.")
+                    # For debugging, it's useful to see both, and their types
+                    logger.debug(f"[_assess_correctness] Test case {i} FAILED:")
+                    logger.debug(
+                        f"  Expected (type: {type(expected_val_from_yaml)}, keys: {list(expected_val_from_yaml.keys()) if isinstance(expected_val_from_yaml, dict) else 'N/A'}): {expected_val_from_yaml}")
+                    logger.debug(
+                        f"  Got (type: {type(processed_actual_output)}, keys: {list(processed_actual_output.keys()) if isinstance(processed_actual_output, dict) else 'N/A'}): {processed_actual_output}")
+                    # Log the original JSON string version too for good measure if it was a dict
+                    if isinstance(actual_output_from_llm_json, dict):
+                        logger.debug(f"  Original 'Got' from JSON (str keys): {actual_output_from_llm_json}")
+
+            elif actual_output_detail_json:  # status was not "success"
+                logger.debug(
+                    f"[_assess_correctness] Test case {i} had error in harness: {actual_output_detail_json.get('error_type')} - {actual_output_detail_json.get('error')}")
+            else:  # No output detail found for this test case index
+                logger.debug(f"[_assess_correctness] Test case {i}: No output detail found in results.")
 
         if total_tests == 0:
-            return 1.0, 0, 0
-        
+            logger.debug("[_assess_correctness] No test cases to run, correctness is 1.0 by default.")
+            return 1.0, 0, 0  # Or perhaps 0.0 if no tests means it can't be verified? Your choice.
+
         correctness = passed_tests / total_tests
+        logger.debug(
+            f"[_assess_correctness] Final assessment: Correctness={correctness:.2f} ({passed_tests}/{total_tests})")
         return correctness, passed_tests, total_tests
 
     async def _run_static_analysis_tool(self, tool_name: str, command: List[str], program_id: str) -> Tuple[
@@ -313,34 +418,46 @@ print(json.dumps(final_output, default=custom_json_serializer))
             logger.error(f"Error during {tool_name} analysis for program {program_id}: {e}", exc_info=True)
             return None, f"{tool_name}: Analysis error - {type(e).__name__}"
 
-    async def evaluate_program(self, program: Program, task: TaskDefinition) -> Program:  # Method_v4 (Pylint as Library)
-        logger.info(f"Evaluating program: {program.id} for task: {task.id} (Mode: {task.improvement_mode})")
-        program.status = "evaluating"
-        program.errors = []
-        program.fitness_scores = {
-            "correctness": 0.0,
-            "runtime_ms": float('inf'),
-            "pylint_score": -10.0,  # Pylint scores are typically -10 to 10. Let's use a clear "not run" default.
+    async def evaluate_program(self, program: Program, task: TaskDefinition) -> Program:
+        logger.debug(
+            f"[evaluate_program] Starting for Program ID: {program.id}, Task ID: {task.id}. Current Status: {program.status}")
+        logger.debug(
+            f"[evaluate_program] Program Code (first 200 chars):\n{program.code[:200].replace(chr(10), '<NL>')}")
+
+        program.status = "evaluating"  # Set status at the beginning
+        program.errors = []  # Clear previous errors
+        # Initialize fitness_scores if not already, or ensure keys exist
+        default_scores = {
+            "correctness": 0.0, "runtime_ms": float('inf'),
+            "pylint_score": settings.DEFAULT_METRIC_VALUE.get("pylint_score", -10.0),
             "cyclomatic_complexity_avg": float('inf'),
-            "maintainability_index": -1.0
+            "maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", -1.0),
+            "passed_tests": 0.0,
+            "total_tests": float(len(task.input_output_examples) if task.input_output_examples else 0)
         }
+        program.fitness_scores = {**default_scores, **program.fitness_scores}
 
         syntax_errors = self._check_syntax(program.code)
         if syntax_errors:
             program.errors.extend(syntax_errors)
-            program.status = "failed_evaluation"
-            logger.warning(f"Syntax errors found in program {program.id}: {syntax_errors}")
-            return program
-        logger.debug(f"Syntax check passed for program {program.id}.")
+            program.status = "failed_evaluation_syntax"  # More specific status
+            logger.warning(f"[evaluate_program] Syntax errors for {program.id}: {syntax_errors}")
+            logger.debug(
+                f"[evaluate_program] FINALIZING for {program.id}. Status: {program.status}. Fitness: {program.fitness_scores}. Errors: {program.errors}. Returning program object.")
+            return program  # Return the program object with errors
+        logger.debug(f"[evaluate_program] Syntax check passed for {program.id}.")
 
+        # --- Static Analysis Block ---
         temp_code_file_path = None
-        if program.code.strip():  # Only run static analysis on non-empty code
+        if program.code.strip():
+            logger.debug(f"[evaluate_program] Proceeding with static analysis for {program.id}")
             try:
                 # Create a temporary file for Pylint and Radon to analyze
                 # Using NamedTemporaryFile to ensure it has a path accessible by other tools (Radon)
                 with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmpf:
                     tmpf.write(program.code)
                     temp_code_file_path = tmpf.name
+                logger.debug(f"[evaluate_program] Temp code file for static analysis: {temp_code_file_path}")
 
                 # --- Pylint Analysis (using Pylint as a library) ---
                 needs_pylint = "pylint_score" in (task.primary_focus_metrics or []) or \
@@ -467,68 +584,76 @@ print(json.dumps(final_output, default=custom_json_serializer))
                                 f"Could not determine Radon MI from parsed JSON for {program.id}. Data: {mi_data}")
                             program.fitness_scores["maintainability_index"] = -1.0  # Indicate error/unknown
 
-            except Exception as e_static:  # Catch-all for issues in the static analysis block
-                logger.error(f"Unexpected error during static analysis setup or execution for {program.id}: {e_static}",
-                             exc_info=True)
+            except Exception as e_static:
+                logger.error(
+                    f"[evaluate_program] Unexpected error during static analysis setup/exec for {program.id}: {e_static}",
+                    exc_info=True)
                 program.errors.append(f"Static Analysis: General error - {type(e_static).__name__}")
+                # Don't return yet, try functional evaluation if possible, or let it proceed to set status.
             finally:
                 if temp_code_file_path and os.path.exists(temp_code_file_path):
                     os.remove(temp_code_file_path)
+                    logger.debug(f"[evaluate_program] Removed temp static analysis file: {temp_code_file_path}")
         elif not program.code.strip():
-            logger.info(f"Program {program.id} has empty code. Skipping static analysis.")
-            # Assign neutral/worst scores for empty code to avoid issues in selection
-            program.fitness_scores["pylint_score"] = 0.0
-            program.fitness_scores["cyclomatic_complexity_avg"] = float('inf')  # Higher is worse
-            program.fitness_scores["maintainability_index"] = 0.0  # Lower is worse
-
-        # Functional Evaluation (I/O examples) - run if examples exist, regardless of mode (for regression)
-            if task.input_output_examples:
-                logger.debug(f"Executing program {program.id} against {len(task.input_output_examples)} test cases.")
-                execution_results, execution_error = await self._execute_code_safely(program.code,
-                                                                                     task_for_examples=task)
-
-                if execution_error:
-                    logger.warning(f"Execution error for program {program.id}: {execution_error}")
-                    program.errors.append(f"Execution Error: {execution_error}")
-                    program.fitness_scores["correctness"] = 0.0
-                elif execution_results:
-                    logger.debug(f"Execution results for program {program.id}: {execution_results}")
-                    correctness, passed_tests, total_tests = self._assess_correctness(execution_results,
-                                                                                      task.input_output_examples)
-                    program.fitness_scores["correctness"] = correctness
-                    program.fitness_scores["passed_tests"] = float(passed_tests)
-                    program.fitness_scores["total_tests"] = float(total_tests)
-                    if "average_runtime_ms" in execution_results and correctness > 0:  # Ensure positive correctness before assigning runtime
-                        program.fitness_scores["runtime_ms"] = execution_results["average_runtime_ms"]
-                    else:  # If correctness is 0, runtime is effectively infinite or irrelevant for fitness
-                        program.fitness_scores["runtime_ms"] = float('inf')
-
-                    logger.info(
-                        f"Program {program.id} I/O correctness: {correctness * 100:.2f}% ({passed_tests}/{total_tests} tests passed)")
-                    if correctness < 1.0:
-                        program.errors.append(
-                            f"Failed {total_tests - passed_tests} out of {total_tests} I/O test cases.")
-                else:
-                    logger.warning(
-                        f"Execution of program {program.id} yielded no results and no specific error message.")
-                    program.errors.append("Execution Error: Unknown issue, no results from sandbox.")
-                    program.fitness_scores["correctness"] = 0.0
-                    program.fitness_scores["runtime_ms"] = float('inf')
-
-            elif task.improvement_mode == "task_focused":
-                logger.warning(
-                    f"Task {task.id} is 'task_focused' but has no input/output examples. Cannot assess correctness.")
-                program.errors.append(
-                    "Evaluation: Task is 'task_focused' but no I/O examples provided for correctness assessment.")
-
-            if not program.errors:
-                program.status = "evaluated"
-            else:
-                program.status = "failed_evaluation"
-
             logger.info(
-                f"Evaluation complete for program {program.id}. Status: {program.status}, Fitness: {program.fitness_scores}")
-            return program
+                f"[evaluate_program] Program {program.id} has empty code. Skipping static analysis, assigning default 'bad' static scores.")
+            # Defaults already set, but can re-affirm or log here.
+
+        # --- Functional Evaluation (I/O examples) ---
+        if task.input_output_examples:
+            logger.debug(
+                f"[evaluate_program] Starting functional evaluation for {program.id} against {len(task.input_output_examples)} test cases.")
+            execution_results, execution_error = await self._execute_code_safely(program.code, task_for_examples=task)
+
+            logger.debug(
+                f"[evaluate_program] _execute_code_safely returned for {program.id} -> execution_results: {str(execution_results)[:200]}..., execution_error: {execution_error}")
+
+            if execution_error:
+                logger.warning(f"[evaluate_program] Execution error for {program.id}: {execution_error}")
+                program.errors.append(f"Execution Error: {execution_error}")
+                program.fitness_scores["correctness"] = 0.0
+                program.status = "failed_evaluation_execution"  # More specific
+            elif execution_results and "test_outputs" in execution_results:  # Ensure "test_outputs" exists
+                logger.debug(
+                    f"[evaluate_program] Execution results for {program.id} (first 200 chars of test_outputs): {str(execution_results.get('test_outputs'))[:200]}")
+                correctness, passed_tests, total_tests = self._assess_correctness(execution_results,
+                                                                                  task.input_output_examples)
+                logger.debug(
+                    f"[evaluate_program] _assess_correctness for {program.id} -> correctness: {correctness}, passed: {passed_tests}, total: {total_tests}")
+                program.fitness_scores["correctness"] = correctness
+                program.fitness_scores["passed_tests"] = float(passed_tests)
+                # program.fitness_scores["total_tests"] already set from default_scores
+                if "average_runtime_ms" in execution_results and correctness > 0:
+                    program.fitness_scores["runtime_ms"] = execution_results["average_runtime_ms"]
+
+                if correctness < 1.0 and not execution_error:  # Don't double-log if execution_error already captured it
+                    program.errors.append(f"Failed {total_tests - passed_tests} out of {total_tests} I/O test cases.")
+                    if not program.status == "evaluating":  # If not already set to a more specific failure
+                        program.status = "failed_evaluation_tests"
+            else:  # execution_results is None or malformed, and no execution_error string
+                logger.warning(
+                    f"[evaluate_program] Execution of {program.id} yielded no results or malformed results, and no specific error message from _execute_code_safely. Raw results: {str(execution_results)[:200]}")
+                program.errors.append("Execution Error: Unknown issue or malformed results from sandbox.")
+                program.fitness_scores["correctness"] = 0.0
+                program.status = "failed_evaluation_unknown_exec"
+
+        elif task.improvement_mode == "task_focused" and not task.input_output_examples:
+            logger.warning(
+                f"[evaluate_program] Task {task.id} is 'task_focused' but has no I/O examples. Cannot assess correctness.")
+            program.errors.append("Evaluation: Task 'task_focused' but no I/O examples.")
+            # Status remains 'evaluating' or 'failed_evaluation_syntax' if that happened.
+            # If no errors so far, it's technically evaluated but without correctness.
+            if not program.errors: program.status = "evaluated_no_tests"
+
+        # Final status determination
+        if not program.errors and program.status == "evaluating":  # If it made it through without errors
+            program.status = "evaluated"
+        elif program.errors and program.status == "evaluating":  # If errors were added but status not specifically set to a failure type
+            program.status = "failed_evaluation_generic"
+
+        logger.debug(
+            f"[evaluate_program] FINALIZING for {program.id}. Status: {program.status}. Fitness: {program.fitness_scores}. Errors: {program.errors}. About to return program object.")
+        return program  # Crucially, always return the program object!
 
     # MODIFIED execute method:
     async def execute(self, *args, **kwargs) -> Program:  # Signature changed to match BaseAgent
@@ -539,6 +664,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
         """
         program_arg = kwargs.get("program")
         task_arg = kwargs.get("task")
+        logger.debug(f"[execute wrapper] Called with program: {program_arg.id if program_arg else 'None'}, task: {task_arg.id if task_arg else 'None'}")
 
         # Validate that we got the arguments we need to call evaluate_program
         if not isinstance(program_arg, Program):
