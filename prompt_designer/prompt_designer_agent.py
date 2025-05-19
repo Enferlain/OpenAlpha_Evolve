@@ -1,3 +1,6 @@
+# prompt_designer/prompt_designer_agent.py
+# Version: 1.1.0 (Added LLM Judge Prompt Design)
+
 from typing import Optional, Dict, Any, List
 import logging
 
@@ -7,11 +10,14 @@ logger = logging.getLogger(__name__)
 
 
 class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
-    def __init__(self, task_definition: TaskDefinition):
+    def __init__(self, task_definition: TaskDefinition): # TaskDefinition might not be needed for all prompts if passed directly
         super().__init__()
-        self.task_definition = task_definition
+        # Storing task_definition here might be useful for general context,
+        # but specific methods will receive the relevant task/program objects.
+        self.task_definition_context = task_definition # Store for general reference if needed
         logger.info(
-            f"PromptDesignerAgent initialized for task: {self.task_definition.id} (Mode: {self.task_definition.improvement_mode})")
+            f"PromptDesignerAgent initialized. Context Task ID: {self.task_definition_context.id if self.task_definition_context else 'None'}"
+        )
 
     # --- NEW HELPER METHOD (v1.0.0 for this specific helper) ---
     def _format_static_analysis_feedback_for_llm(self, program_errors: List[str]) -> str:  # Method_v1.0.0
@@ -80,6 +86,45 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
         )
         logger.debug(f"Designed initial prompt:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
+
+    def _format_execution_summary_for_judge_prompt(self,
+                                                   execution_summary: Dict[str, Any]) -> str:  # NEW HELPER (as before)
+        parts = []
+        runs_ok = execution_summary.get("runs_without_error")
+        if runs_ok is not None:
+            parts.append(
+                f"- Standalone Execution Attempt: {'Script ran successfully.' if runs_ok else 'Script failed to run or crashed.'}")
+
+        runtime_ms = execution_summary.get("standalone_script_runtime_ms")
+        if runtime_ms is not None and runtime_ms != float('inf'):
+            parts.append(f"  - Runtime (if successful): {runtime_ms:.2f} ms")
+
+        exec_stdout = execution_summary.get("stdout", "").strip()
+        exec_stderr = execution_summary.get("stderr", "").strip()
+
+        log_parts = []
+        if exec_stdout:
+            log_parts.append(f"STDOUT:\n{exec_stdout[:1000]}{'...' if len(exec_stdout) > 1000 else ''}")
+        if exec_stderr:
+            log_parts.append(f"STDERR:\n{exec_stderr[:1000]}{'...' if len(exec_stderr) > 1000 else ''}")
+
+        if log_parts:
+            parts.append("- Key Execution Logs/Errors:\n  " + "\n  ".join(log_parts))
+        elif runs_ok is False:
+            parts.append(
+                "- Key Execution Logs/Errors: Execution failed, specific logs not summarized here (check program.errors).")
+
+        ruff_violations = execution_summary.get("ruff_violations")
+        if ruff_violations is not None and ruff_violations != float('inf'):
+            parts.append(f"- Static Analysis (Ruff): Found {int(ruff_violations)} issues.")
+
+        correctness = execution_summary.get("correctness")
+        if correctness is not None:
+            parts.append(f"- I/O Test Correctness (if applicable): {correctness * 100:.1f}%")
+
+        if not parts:
+            return "No specific automated check observations were provided."
+        return "\n".join(parts)
 
     # Modified: design_crossover_prompt (no direct Ruff feedback to LLM, but parents' general quality matters)
     def design_crossover_prompt(self, task: TaskDefinition, parent_program1: Program, parent_program2: Program) -> str: # v1.0.1 (minor logging)
@@ -376,6 +421,38 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             f"No surrounding text, explanations, or markdown code fences."
         )
         logger.debug(f"Designed failed-diff fallback prompt:\n{prompt}")
+        return prompt
+
+    # --- MODIFIED: design_llm_judge_prompt (Corrected f-string formatting) ---
+    def design_llm_judge_prompt(self,
+                                task: TaskDefinition,
+                                program_to_judge: Program,
+                                execution_summary: Dict[str, Any]
+                                ) -> str:  # Method_v1.0.1
+        logger.info(f"Designing LLM judge prompt for Program ID: {program_to_judge.id}, Task ID: {task.id}")
+
+        formatted_observations = self._format_execution_summary_for_judge_prompt(execution_summary)
+
+        # Using the (f"..." f"...") style for consistency and readability
+        prompt = (
+            f"You are an impartial and expert AI Code Reviewer. Your task is to meticulously evaluate a provided Python code solution based on the given task context, user guidelines, and observed behaviors.\n\n"
+            f"## Task Context & Goal:\n"
+            f"Problem Description:\n{task.description}\n\n"
+            f"Target Solution Description:\n{task.target_solution_description if task.target_solution_description else 'Not explicitly specified, infer from problem description.'}\n\n"
+            f"## User's Evaluation Guidelines:\n"
+            f"Please judge the code primarily based on these guidelines:\n{task.evaluation_guidelines_for_llm_judge if task.evaluation_guidelines_for_llm_judge else 'No specific user guidelines provided. Use general principles of good code quality, correctness for the task, and creativity.'}\n\n"
+            f"## Code for Review:\n```python\n{program_to_judge.code}\n```\n\n"
+            f"## Observations from Automated Checks:\n{formatted_observations}\n\n"
+            f"## Your Evaluation Task:\n"
+            f"1. Carefully review the \"Code for Review\" in light of the \"Task Context & Goal\" and, most importantly, the \"User's Evaluation Guidelines.\"\n"
+            f"2. Consider the \"Observations from Automated Checks\" as additional context. For instance, an `ImportError` might explain why a script didn't run, but the underlying logic could still be sound or flawed based on the guidelines. A crash, however, is a more severe issue.\n"
+            f"3. Provide your assessment as a JSON object with the following two keys:\n"
+            f"   - \"overall_score\": An integer score from 1 (Very Poor) to 10 (Excellent).\n"
+            f"   - \"justification\": A concise (2-4 sentences) textual explanation for your score, highlighting key strengths and weaknesses of the code in relation to the guidelines and task.\n\n"
+            f"Please output *only* the JSON object.\n"
+        )
+        logger.debug(
+            f"Designed LLM Judge Prompt for {program_to_judge.id}:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
     async def execute(self, *args, **kwargs) -> Any:

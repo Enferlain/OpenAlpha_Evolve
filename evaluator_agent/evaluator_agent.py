@@ -1,3 +1,6 @@
+# evaluator_agent/evaluator_agent.py
+# Version: 1.2.0 (Adding standalone script execution check)
+
 import time
 import logging
 import traceback
@@ -13,10 +16,13 @@ import io
 import sys
 from contextlib import redirect_stdout, redirect_stderr
 from typing import Optional, Dict, Any, Tuple, Union, List
-from pylint import lint # Main Pylint entry point for Run
-from pylint.lint import PyLinter # For more direct control
-from pylint.reporters.text import TextReporter # We'll need a reporter
-from core.interfaces import EvaluatorAgentInterface, Program, TaskDefinition # BaseAgent is inherited via EvaluatorAgentInterface
+# from pylint import lint # REMOVED
+# from pylint.lint import PyLinter # REMOVED
+# from pylint.reporters.text import TextReporter # REMOVED
+from core.interfaces import (
+    EvaluatorAgentInterface, Program, TaskDefinition,
+    PromptDesignerInterface, CodeGeneratorInterface # NEW: For calling judge LLM
+)
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -98,19 +104,151 @@ def run_ruff_in_thread(file_path: str, project_root: str) -> Tuple[List[Dict[str
     logger.debug(f"Ruff analysis for {file_path} completed. Violations found: {violations_count}")
     return violations_list, violations_count
 
+# --- NEW: Helper to format execution/Ruff feedback for LLM Judge prompt ---
+def _format_summary_for_llm_judge(self, program: Program, max_errors_to_show: int = 3) -> Tuple[str, str]:
+    """
+    Formats execution errors/logs and Ruff issues for the LLM Judge prompt.
+    Returns (formatted_execution_summary, formatted_ruff_summary)
+    """
+    # Execution Summary
+    exec_feedback_lines = []
+    execution_related_errors = [
+        e for e in program.errors
+        if "Execution Log (STDOUT" in e or \
+           "Execution Log (STDERR" in e or \
+           "Standalone script execution failed" in e or \
+           "ExecutionFailure: ImportError" in e or # Specific import error
+           "I/O Test Harness Error" in e # Error from I/O harness
+    ]
 
-# To this (BaseAgent is inherited via EvaluatorAgentInterface):
+    if execution_related_errors:
+        for i, err_log in enumerate(execution_related_errors):
+            if i < max_errors_to_show:
+                # Remove potential multiple newlines for conciseness in prompt
+                exec_feedback_lines.append(f"  - {err_log.replace(chr(10)+chr(10), chr(10)).strip()}")
+            else:
+                exec_feedback_lines.append(f"  ... and {len(execution_related_errors) - max_errors_to_show} more execution-related messages.")
+                break
+    else:
+        exec_feedback_lines.append("  - No specific execution issues or logs captured beyond run status.")
+    formatted_execution_summary = "\n".join(exec_feedback_lines)
+
+    # Ruff Summary
+    ruff_feedback_lines = []
+    ruff_issues = [e for e in program.errors if e.startswith("Ruff-")]
+    if ruff_issues:
+        for i, ruff_issue in enumerate(ruff_issues):
+            if i < max_errors_to_show:
+                ruff_feedback_lines.append(f"  - {ruff_issue.strip()}")
+            else:
+                ruff_feedback_lines.append(f"  ... and {len(ruff_issues) - max_errors_to_show} more Ruff issues.")
+                break
+    else:
+        ruff_feedback_lines.append("  - No Ruff issues reported.")
+    formatted_ruff_summary = "\n".join(ruff_feedback_lines)
+
+    return formatted_execution_summary, formatted_ruff_summary
+
+# --- NEW HELPER METHOD for Standalone Script Execution (Blueprint Step 2) ---
+async def _execute_standalone_script(
+    self,
+    program_id: str, # For logging
+    code: str,
+    timeout_seconds: Optional[int] = None
+) -> Tuple[bool, str, str, Optional[float]]: # (runs_ok, stdout, stderr, execution_time_ms)
+    """
+    Executes the given code as a standalone Python script in a temporary file.
+    Returns whether it ran successfully (exit code 0), stdout, stderr, and execution time.
+    """
+    effective_timeout = timeout_seconds if timeout_seconds is not None else self.evaluation_timeout_seconds
+    logger.debug(f"[_execute_standalone_script] Attempting to run program ID: {program_id} as standalone script. Timeout: {effective_timeout}s.")
+
+    temp_dir = tempfile.mkdtemp()
+    temp_file_path = os.path.join(temp_dir, f"script_{program_id}.py")
+
+    try:
+        with open(temp_file_path, "w", encoding='utf-8') as f:
+            f.write(code)
+    except Exception as e_write:
+        logger.error(f"[_execute_standalone_script] Failed to write code for {program_id} to temp file {temp_file_path}: {e_write}")
+        return False, "", f"Error writing script to temp file: {e_write}", None
+
+    cmd = [sys.executable, temp_file_path]
+    proc = None
+    start_time_exec = 0.0
+    end_time_exec = 0.0
+
+    try:
+        logger.debug(f"[_execute_standalone_script] Executing: {' '.join(cmd)} in {temp_dir}")
+        start_time_exec = time.monotonic()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=temp_dir # Run script from its own temp directory
+        )
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
+        end_time_exec = time.monotonic()
+        execution_time_ms = (end_time_exec - start_time_exec) * 1000
+
+        stdout_str = stdout_bytes.decode('utf-8', errors='replace').strip()
+        stderr_str = stderr_bytes.decode('utf-8', errors='replace').strip()
+
+        logger.debug(f"[_execute_standalone_script] {program_id} finished. RC: {proc.returncode}, Time: {execution_time_ms:.2f}ms")
+        if stdout_str: logger.debug(f"[_execute_standalone_script] {program_id} STDOUT:\n{stdout_str}")
+        if stderr_str: logger.debug(f"[_execute_standalone_script] {program_id} STDERR:\n{stderr_str}")
+
+        runs_ok = proc.returncode == 0
+        return runs_ok, stdout_str, stderr_str, execution_time_ms
+
+    except asyncio.TimeoutError:
+        if proc:
+            try: proc.kill(); await proc.wait()
+            except ProcessLookupError: pass
+            except Exception as e_kill: logger.error(f"Error killing timed-out process for {program_id}: {e_kill}")
+        logger.warning(f"[_execute_standalone_script] {program_id} execution timed out after {effective_timeout}s.")
+        return False, "", f"Execution timed out after {effective_timeout} seconds.", (time.monotonic() - start_time_exec) * 1000
+    except Exception as e_exec:
+        logger.error(f"[_execute_standalone_script] Unexpected error executing {program_id}: {e_exec}", exc_info=True)
+        exec_time = (time.monotonic() - start_time_exec) * 1000 if start_time_exec > 0 else None
+        return False, "", f"Unexpected execution error: {type(e_exec).__name__} - {str(e_exec)}", exec_time
+    finally:
+        try:
+            if os.path.exists(temp_file_path): os.remove(temp_file_path)
+            if os.path.exists(temp_dir): os.rmdir(temp_dir)
+        except Exception as e_cleanup:
+            logger.error(f"Error cleaning temp files for {program_id}: {e_cleanup}")
+# --- END NEW HELPER METHOD ---
+
+
 class EvaluatorAgent(EvaluatorAgentInterface):
-    def __init__(self, task_definition: Optional[TaskDefinition] = None):
-        # super().__init__() will correctly call BaseAgent.__init__ via the MRO
-        super().__init__(config=None) # Pass config=None, as EvaluatorAgent doesn't seem to use its own specific config dict
-        self.task_definition = task_definition
-        self.evaluation_model_name = settings.EVALUATION_MODEL_NAME
+    def __init__(self,
+                 task_definition: Optional[TaskDefinition] = None,
+                 prompt_designer: Optional[PromptDesignerInterface] = None, # NEW
+                 code_generator_for_judge: Optional[CodeGeneratorInterface] = None # NEW
+                ):
+        super().__init__(config=None)
+        self.task_definition = task_definition # For overall context
         self.evaluation_timeout_seconds = settings.EVALUATION_TIMEOUT_SECONDS
-        logger.info(f"EvaluatorAgent initialized with model: {self.evaluation_model_name}, timeout: {self.evaluation_timeout_seconds}s")
+
+        # Agents needed for LLM-as-Judge functionality
+        # These could be passed in or instantiated here. For now, let's assume they can be set up.
+        # In TaskManagerAgent, these would be passed from its own instances.
+        self.prompt_designer = prompt_designer
+        self.code_generator_for_judge = code_generator_for_judge
+
+        # Judge LLM model name (can be different from code generation model)
+        self.judge_llm_model_name = settings.EVALUATION_MODEL_NAME # From settings.py
+        self.judge_llm_temperature = 0.3 # Typically lower temp for more factual/consistent judging
+
+        logger.info(f"EvaluatorAgent initialized. Timeout: {self.evaluation_timeout_seconds}s. Judge Model: {self.judge_llm_model_name}")
         if self.task_definition:
-            logger.info(f"EvaluatorAgent task_definition: {self.task_definition.id} (Mode: {self.task_definition.improvement_mode})")
-        logger.debug(f"EvaluatorAgent instance created. Task ID: {self.task_definition.id if self.task_definition else 'None'}")
+            logger.info(f"EvaluatorAgent task_definition ID: {self.task_definition.id}")
+        if not self.prompt_designer or not self.code_generator_for_judge:
+            logger.warning("EvaluatorAgent initialized WITHOUT prompt_designer or code_generator_for_judge. LLM-as-Judge functionality will be disabled.")
+
+    # Add the new helper method to the class
+    _execute_standalone_script = _execute_standalone_script # Binding the async def
 
     def _check_syntax(self, code: str) -> List[str]:
         logger.debug(f"[_check_syntax] Checking syntax for code (first 100 chars): {code[:100].replace(chr(10), '<NL>')}") # <NL> for newlines
@@ -544,19 +682,85 @@ print(json.dumps(final_output, default=custom_json_serializer))
             )
             return None, f"{tool_name}: Unspecified analysis error - {type(e).__name__}"
 
-    # --- REFINED: evaluate_program (v1.1.1 - Focus on Ruff processing and Status Logic) ---
-    async def evaluate_program(self, program: Program, task: TaskDefinition) -> Program:  # Method_v1.1.1
-        logger.debug(
-            f"[evaluate_program] Starting for Program ID: {program.id}, Task ID: {task.id}. Current Status: {program.status}")
+    async def _invoke_llm_judge(self,
+                                task: TaskDefinition,
+                                program_to_judge: Program,
+                                execution_summary_for_judge: Dict[str, Any]
+                                ) -> Tuple[Optional[float], Optional[str]]:  # (score, justification)
+        """
+        Invokes the LLM-as-a-Judge.
+        """
+        if not self.prompt_designer or not self.code_generator_for_judge:
+            logger.warning(
+                f"LLM Judge cannot be invoked for {program_to_judge.id}: Missing prompt_designer or code_generator_for_judge.")
+            return None, "LLM Judge components not configured."
+
+        if not task.evaluation_guidelines_for_llm_judge:
+            logger.info(
+                f"No evaluation_guidelines_for_llm_judge for task {task.id}. Skipping LLM Judge for {program_to_judge.id}.")
+            return None, "No user guidelines provided for LLM Judge."
+
+        judge_prompt = self.prompt_designer.design_llm_judge_prompt(
+            task=task,
+            program_to_judge=program_to_judge,
+            execution_summary=execution_summary_for_judge
+        )
+
+        try:
+            logger.info(f"Calling Judge LLM ({self.judge_llm_model_name}) for program {program_to_judge.id}...")
+            # Using the code_generator_for_judge instance to make the API call
+            raw_judge_response = await self.code_generator_for_judge.generate_code(
+                # Using generate_code as it's the generic LLM call method
+                prompt=judge_prompt,
+                model_name=self.judge_llm_model_name,
+                temperature=self.judge_llm_temperature,
+                output_format="code"  # Expecting raw text (JSON string)
+            )
+
+            if not raw_judge_response.strip():
+                logger.warning(f"LLM Judge for {program_to_judge.id} returned an empty response.")
+                return None, "LLM Judge returned empty response."
+
+            logger.debug(f"Raw response from Judge LLM for {program_to_judge.id}: {raw_judge_response}")
+
+            # Parse the JSON response
+            judge_output = json.loads(raw_judge_response)
+            score = judge_output.get("overall_score")
+            justification = judge_output.get("justification")
+
+            if score is None or justification is None:
+                logger.warning(
+                    f"LLM Judge response for {program_to_judge.id} missing 'overall_score' or 'justification'. Raw: {raw_judge_response}")
+                return None, f"LLM Judge response malformed. Raw: {raw_judge_response[:200]}"
+
+            logger.info(f"LLM Judge for {program_to_judge.id}: Score={score}, Justification='{justification[:100]}...'")
+            return float(score), str(justification)
+
+        except json.JSONDecodeError as e:
+            logger.error(
+                f"Failed to decode JSON from LLM Judge for {program_to_judge.id}: {e}. Raw response: {raw_judge_response}",
+                exc_info=True)
+            return None, f"LLM Judge JSONDecodeError. Raw: {raw_judge_response[:200]}"
+        except Exception as e_judge:
+            logger.error(f"Error during LLM Judge invocation for {program_to_judge.id}: {e_judge}", exc_info=True)
+            return None, f"LLM Judge invocation error: {type(e_judge).__name__}"
+
+    # --- MODIFIED: evaluate_program (Integrate LLM-as-Judge call) ---
+    async def evaluate_program(self, program: Program, task: TaskDefinition) -> Program:
+        logger.debug(f"[evaluate_program] Starting for Program ID: {program.id}, Task ID: {task.id}")
         program.status = "evaluating"
-        program.errors = []
+        program.errors = [] # Clear previous errors
+        program.llm_judge_feedback = None # Clear previous judge feedback
 
         default_scores = {
             "correctness": 0.0, "runtime_ms": float('inf'),
             "ruff_violations": float('inf'), "cyclomatic_complexity_avg": float('inf'),
             "maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", -1.0),
             "passed_tests": 0.0,
-            "total_tests": float(len(task.input_output_examples) if task.input_output_examples else 0)
+            "total_tests": float(len(task.input_output_examples) if task.input_output_examples else 0),
+            "runs_without_error": False,
+            "standalone_script_runtime_ms": float('inf'),
+            "llm_judge_overall_score": settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0) # NEW
         }
         program.fitness_scores = {**default_scores, **(program.fitness_scores if program.fitness_scores else {})}
 
@@ -566,21 +770,24 @@ print(json.dumps(final_output, default=custom_json_serializer))
             program.errors.extend(syntax_errors)
             program.status = "failed_evaluation_syntax"
             logger.warning(f"[evaluate_program] Syntax errors for {program.id}: {syntax_errors}")
-            program.fitness_scores["ruff_violations"] = float('inf')
+            # Ensure all relevant scores reflect failure
+            program.fitness_scores["runs_without_error"] = False
+            program.fitness_scores["ruff_violations"] = float('inf') # Can't run Ruff if syntax error
             return program
         logger.debug(f"[evaluate_program] Syntax check passed for {program.id}.")
 
-        temp_code_file_path = None
+        temp_code_file_path = None # Initialize
         try:
             # 2. Static Analysis
             if program.code.strip():
-                logger.debug(f"[evaluate_program] Proceeding with static analysis for {program.id}")
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding='utf-8') as tmpf:
-                    tmpf.write(program.code)
-                    temp_code_file_path = tmpf.name
+                # Create temp file (ensure this logic is robust as in your full version)
+                _temp_file_obj = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding='utf-8')
+                _temp_file_obj.write(program.code)
+                temp_code_file_path = _temp_file_obj.name
+                _temp_file_obj.close()
 
-                current_file_dir = os.path.dirname(os.path.abspath(__file__))
-                project_root_path = os.path.dirname(current_file_dir)
+                current_file_dir = os.path.dirname(os.path.abspath(__file__)) # Correct pathing for Ruff
+                project_root_path = os.path.dirname(os.path.dirname(current_file_dir)) # Assuming evaluator_agent is in a subfolder of project root
 
                 # --- Ruff Analysis (Ensuring all violations counted and logged) ---
                 logger.info(f"Running Ruff analysis for program {program.id}...")
@@ -682,7 +889,35 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 program.fitness_scores["cyclomatic_complexity_avg"] = 0.0
                 program.fitness_scores["maintainability_index"] = 100.0
 
-            # 3. Functional Evaluation
+            # 3. Standalone Script Execution Check (NEW - Blueprint Step 2)
+            # Heuristic: If target_solution_description exists and implies a script, try to run it.
+            # A more robust way would be a dedicated flag in TaskDefinition, e.g., `is_executable_script: bool`.
+            # For now, let's assume we attempt this if `target_solution_description` is present.
+            should_attempt_standalone_run = bool(task.target_solution_description) and program.code.strip()
+
+            if should_attempt_standalone_run:
+                logger.info(f"[evaluate_program] Attempting standalone execution for {program.id} based on task configuration.")
+                runs_ok, script_stdout, script_stderr, script_exec_time_ms = await self._execute_standalone_script(
+                    program_id=program.id,
+                    code=program.code,
+                    timeout_seconds=self.evaluation_timeout_seconds # Or a specific timeout for this step
+                )
+                program.fitness_scores["runs_without_error"] = runs_ok
+                if script_exec_time_ms is not None:
+                    program.fitness_scores["standalone_script_runtime_ms"] = script_exec_time_ms
+
+                if not runs_ok:
+                    program.status = "failed_evaluation_execution" # Set status if it crashes
+                    error_log_msg = f"Standalone script execution failed for {program.id}."
+                    if script_stderr: error_log_msg += f"\nSTDERR:\n{script_stderr}"
+                    program.errors.append(error_log_msg)
+                    logger.warning(f"[evaluate_program] {error_log_msg.splitlines()[0]}")
+                else:
+                    logger.info(f"[evaluate_program] Standalone script {program.id} executed successfully.")
+                    if script_stdout: program.errors.append(f"Execution Log (STDOUT for {program.id}):\n{script_stdout}") # Log stdout for LLM judge
+                    if script_stderr: program.errors.append(f"Execution Log (STDERR for {program.id} - non-fatal):\n{script_stderr}") # Log stderr even if RC 0
+
+            # 4. Functional Evaluation
             # This section should populate program.fitness_scores["correctness"], ["passed_tests"], ["runtime_ms"]
             # and add execution-related errors to program.errors
             # The _execute_code_safely and _assess_correctness methods from your file seemed okay.
@@ -710,6 +945,32 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 program.errors.append("Evaluation: Task 'task_focused' but no I/O examples for correctness check.")
                 # Correctness remains default 0, or could be set to 1.0 if no tests means "not failed"
                 # Let's assume correctness 0 if it can't be verified for task_focused.
+
+            # --- 5. LLM-as-a-Judge Invocation (NEW - Blueprint Step 3) ---
+            if program.status not in ["failed_evaluation_syntax"]: # Don't judge if basic syntax error
+                # Populate the execution_summary_for_judge with final values from program.fitness_scores and program.errors
+                # This summary is what PromptDesignerAgent will use.
+                # This needs to be done carefully to pass the right info.
+                # For now, let's assume execution_summary_for_judge is built up correctly in prior steps.
+                # Example:
+                current_exec_summary = {
+                    "runs_without_error": program.fitness_scores.get("runs_without_error"),
+                    "standalone_script_runtime_ms": program.fitness_scores.get("standalone_script_runtime_ms"),
+                    "stdout": next((e.split("STDOUT for")[1].strip() for e in program.errors if "STDOUT for" in e), ""), # Simple extraction
+                    "stderr": next((e.split("STDERR for")[1].strip() for e in program.errors if "STDERR for" in e or "Standalone script execution failed" in e), ""), # Simple extraction
+                    "ruff_violations": program.fitness_scores.get("ruff_violations"),
+                    "correctness": program.fitness_scores.get("correctness")
+                }
+
+                judge_score, judge_justification = await self._invoke_llm_judge(
+                    task, program, current_exec_summary
+                )
+                if judge_score is not None:
+                    program.fitness_scores["llm_judge_overall_score"] = judge_score
+                if judge_justification is not None:
+                    program.llm_judge_feedback = judge_justification
+                if judge_score is None and judge_justification: # If scoring failed but got some feedback
+                    program.errors.append(f"LLM Judge Note: {judge_justification}")
 
             # --- UNTANGLED AND REFINED Final Status Determination Logic ---
             if program.status == "evaluating":  # Check if status hasn't been set to a critical failure already
@@ -759,12 +1020,13 @@ print(json.dumps(final_output, default=custom_json_serializer))
 
         logger.info(
             f"[evaluate_program] FINALIZED for Program ID: {program.id}. Status: {program.status}. "
-            f"Correctness: {program.fitness_scores.get('correctness', 0.0) * 100:.1f}%, "
+            f"Runs w/o Error: {program.fitness_scores.get('runs_without_error', 'N/A')}, "
+            f"Correctness (I/O): {program.fitness_scores.get('correctness', 0.0) * 100:.1f}%, "
             f"Ruff Violations: {program.fitness_scores.get('ruff_violations', 'N/A')}, "
-            f"Errors reported: {len(program.errors)}"
+            f"Errors logged: {len(program.errors)}"
         )
-        # logger.debug(f"Full fitness scores for {program.id}: {program.fitness_scores}") # Already in INFO
-        if program.errors: logger.debug(f"Detailed errors for {program.id}: {program.errors}")
+        # logger.debug(f"Full fitness scores for {program.id}: {program.fitness_scores}")
+        if program.errors: logger.debug(f"Detailed errors/logs for {program.id}: {program.errors}")
         return program
 
     async def execute(self, *args, **kwargs) -> Program:  # Signature changed to match BaseAgent
