@@ -123,15 +123,29 @@ async def run_alpha_evolve(cli_args):
 
     logger.info(
         f"Successfully created TaskDefinition for task: '{current_task.id}' (Mode: {current_task.improvement_mode})")
-    if current_task.initial_seed_code:
-        logger.info(f"  Initial seed code will be used (length: {len(current_task.initial_seed_code)} characters).")
+
+    # --- CORRECTED LOGGING for initial_seed_code_or_ideas ---
+    if current_task.initial_seed_code_or_ideas:
+        logger.info(
+            f"  Initial seed code or ideas will be used (length: {len(current_task.initial_seed_code_or_ideas)} characters).")
+    # --- END CORRECTION ---
+
     if current_task.primary_focus_metrics:
         logger.info(f"  Primary focus metrics: {current_task.primary_focus_metrics}")
     if current_task.specific_improvement_directives:
         logger.info(f"  Specific improvement directives: '{current_task.specific_improvement_directives}'")
 
+    # New fields we might want to log for visibility:
+    if current_task.target_solution_description:
+        logger.info(
+            f"  Target solution description: '{current_task.target_solution_description[:100]}...'")  # Log a snippet
+    if current_task.evaluation_guidelines_for_llm_judge:
+        logger.info(
+            f"  Evaluation guidelines for LLM judge provided (length: {len(current_task.evaluation_guidelines_for_llm_judge)} chars).")
+
     # 4. Initialize the Task Manager Agent
     try:
+        task_manager = TaskManagerAgent(task_definition=current_task)
         task_manager = TaskManagerAgent(task_definition=current_task)
     except ValueError as ve:  # E.g. API key not found in CodeGeneratorAgent's init
         logger.error(f"Configuration error during TaskManagerAgent initialization: {ve}", exc_info=True)

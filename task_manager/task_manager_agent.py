@@ -75,97 +75,86 @@ class TaskManagerAgent(TaskManagerInterface):
 
         self.start_time_overall_run: Optional[float] = None
 
-    async def initialize_population(self) -> List[Program]:  # Method_v2.1.0 (fix for creation_method)
+    async def initialize_population(self) -> List[Program]:  # Method_v2.1.1 (Using initial_seed_code_or_ideas)
         logger.info(
             f"Initializing population for task: {self.task_definition.id} (Mode: {self.task_definition.improvement_mode})")
         initial_population = []
-
         programs_to_generate_from_prompt = self.population_size
         start_index_for_prompt_generation = 0
 
-        if self.task_definition.initial_seed_code and self.task_definition.improvement_mode == "general_refinement":
-            logger.info(f"Using provided initial_seed_code for the first program.")
+        # --- CORRECTED to use initial_seed_code_or_ideas ---
+        if self.task_definition.initial_seed_code_or_ideas and \
+                self.task_definition.improvement_mode == "general_refinement":
+            logger.info(f"Using provided 'initial_seed_code_or_ideas' for the first program.")
             program_id = f"{self.task_definition.id}_gen0_seed_prog0"
+
+            # If it's just "ideas" (text), it might not be valid code directly.
+            # For now, we'll assume if it's provided, it's intended as the 'code' field.
+            # The PromptDesignerAgent for initial prompt also uses this field.
+            # If it's ideas, the initial program might fail syntax but that's okay,
+            # as it's a seed for refinement.
+            seed_content = self.task_definition.initial_seed_code_or_ideas
+
             seed_program = Program(
                 id=program_id,
-                code=self.task_definition.initial_seed_code,
+                code=seed_content if seed_content else "# Empty seed provided via initial_seed_code_or_ideas",
                 generation=0,
-                status="unevaluated",
-                task_id=self.task_definition.id,  # Ensure task_id is set
-                creation_method="initial_seed"
+                status="unevaluated",  # Will be evaluated
+                task_id=self.task_definition.id,
+                creation_method="initial_seed"  # This creation_method is fine
             )
             initial_population.append(seed_program)
-            # await self.database.save_program(seed_program) # Let's save all at the end or after evaluation
-
             programs_to_generate_from_prompt -= 1
             start_index_for_prompt_generation = 1
             logger.info(f"Will generate {programs_to_generate_from_prompt} additional programs using initial prompt.")
 
         if programs_to_generate_from_prompt > 0:
-            if self.task_definition.improvement_mode == "general_refinement" and not self.task_definition.initial_seed_code:
+            # --- CORRECTED to use initial_seed_code_or_ideas ---
+            if self.task_definition.improvement_mode == "general_refinement" and \
+                    not self.task_definition.initial_seed_code_or_ideas:
                 logger.warning(
-                    f"Task mode is 'general_refinement' but no initial_seed_code was provided. Proceeding with standard initial prompt for task '{self.task_definition.id}'. This might not be the intended behavior.")
+                    f"Task mode is 'general_refinement' but no 'initial_seed_code_or_ideas' was provided. "
+                    f"Proceeding with standard initial prompt for task '{self.task_definition.id}'.")
 
+            # The PromptDesignerAgent's design_initial_prompt is already updated to use initial_seed_code_or_ideas
             initial_prompt_text = self.prompt_designer.design_initial_prompt(self.task_definition)
-            if not initial_prompt_text.strip() and self.task_definition.improvement_mode == "general_refinement":
-                logger.warning(
-                    "Initial prompt from PromptDesigner was empty for general_refinement mode. This is unexpected.")
-                initial_prompt_text = (
-                    f"You are an expert Python programmer. The primary goal is to work with and refine Python code. "
-                    f"The current task is '{self.task_definition.description}'. "
-                    f"Function name of interest is '{self.task_definition.function_name_to_evolve}'. "
-                    f"Allowed imports: {self.task_definition.allowed_imports}. "
-                    f"Provide a complete Python solution. No markdown fences or explanations."
-                )
 
-            for i in range(start_index_for_prompt_generation, self.population_size):
-                if len(initial_population) >= self.population_size:
-                    break
+            # Safety check if prompt is empty (PromptDesigner should handle this, but defense in depth)
+            if not initial_prompt_text.strip():
+                logger.error(
+                    f"Initial prompt for task {self.task_definition.id} was empty. Cannot generate initial population from prompt.")
+                # Potentially return empty list or raise error, for now, just won't generate.
+            else:
+                for i in range(start_index_for_prompt_generation, self.population_size):
+                    if len(initial_population) >= self.population_size:
+                        break
+                    program_id = f"{self.task_definition.id}_gen0_prog{i}"
+                    logger.debug(
+                        f"Generating initial program {len(initial_population) + 1}/{self.population_size} (ID: {program_id}) using prompt.")
 
-                program_id = f"{self.task_definition.id}_gen0_prog{i}"
-                logger.debug(
-                    f"Generating initial program {len(initial_population) + 1}/{self.population_size} (ID: {program_id}) using prompt.")
+                    async with self._api_call_semaphore:
+                        current_time = time.monotonic()
+                        time_since_last_call = current_time - self._last_api_call_release_time
+                        if time_since_last_call < MIN_SECONDS_BETWEEN_CALLS:
+                            sleep_duration = MIN_SECONDS_BETWEEN_CALLS - time_since_last_call
+                            logger.debug(f"Rate limiting: sleeping for {sleep_duration:.2f}s before next API call.")
+                            await asyncio.sleep(sleep_duration)
 
-                # Small rate limit for initial generation if multiple calls are very fast
-                async with self._api_call_semaphore:
-                    current_time = time.monotonic()
-                    time_since_last_call = current_time - self._last_api_call_release_time
-                    if time_since_last_call < MIN_SECONDS_BETWEEN_CALLS:
-                        sleep_duration = MIN_SECONDS_BETWEEN_CALLS - time_since_last_call
-                        logger.debug(f"Rate limiting: sleeping for {sleep_duration:.2f}s before next API call.")
-                        await asyncio.sleep(sleep_duration)
+                        generated_code = await self.code_generator.generate_code(initial_prompt_text,
+                                                                                 temperature=settings.TEMPERATURE_INITIAL_GEN)
+                        self._last_api_call_release_time = time.monotonic()
 
-                    generated_code = await self.code_generator.generate_code(initial_prompt_text, temperature=settings.TEMPERATURE_INITIAL_GEN)
-                    self._last_api_call_release_time = time.monotonic()
+                    program = Program(
+                        id=program_id,
+                        code=generated_code,
+                        generation=0,
+                        status="unevaluated",
+                        task_id=self.task_definition.id,
+                        creation_method="initial_prompt"
+                    )
+                    initial_population.append(program)
 
-                program = Program(
-                    id=program_id,
-                    code=generated_code,
-                    generation=0,
-                    status="unevaluated",
-                    task_id=self.task_definition.id,
-                    creation_method="initial_prompt"
-                )
-                initial_population.append(program)
-                # await self.database.save_program(program) # Let's save all at the end or after evaluation
-
-        # Save all initialized programs to the database (moved from inside the loop)
-        # This might be better done after evaluation, but for now, let's ensure they are saved before returning.
-        # The evaluate_population method will re-save them with updated status and fitness scores.
-        # Actually, initialize_population is called, then evaluate_population.
-        # evaluate_population saves programs *after* they are evaluated.
-        # So, we need to save them here if they need to be in DB before evaluation starts,
-        # or rely on evaluate_population to do the first save.
-        # Let's check `evaluate_population`'s behavior.
-        # `evaluate_population` calls `self.database.save_program(gather_result)` or the modified program.
-        # So, programs created in `initialize_population` don't strictly need to be saved here IF
-        # they are immediately passed to `evaluate_population`.
-        # Let's assume they are: `current_population = await self.initialize_population()`
-        #                       `current_population = await self.evaluate_population(current_population)`
-        # This is fine. The `creation_method` will be set on the object, and `evaluate_population` will save it.
-
-        logger.info(
-            f"Initialized population with {len(initial_population)} programs. Their creation_methods are now set!")
+        logger.info(f"Initialized population with {len(initial_population)} programs.")
         return initial_population
 
     # --- MODIFIED: _calculate_population_metrics (Blueprint Step 6 - Final part) ---
@@ -240,7 +229,6 @@ class TaskManagerAgent(TaskManagerInterface):
         }
         logger.debug(f"Calculated population metrics: {summary}")
         return summary
-
 
     async def evaluate_population(self, population: List[Program]) -> List[Program]:
         logger.info(f"Evaluating population of {len(population)} programs.")
@@ -447,82 +435,107 @@ class TaskManagerAgent(TaskManagerInterface):
         logger.info(f"Successfully generated crossover offspring {offspring.id}.")
         return offspring
 
-    # generate_offspring method (for mutation/bug_fix) needs to use the updated _get_ancestral_summary_for_llm
-    # The call to self.prompt_designer.design_mutation_prompt / design_bug_fix_prompt will use the
-    # version of PromptDesignerAgent that correctly formats Ruff feedback from program.errors.
     async def generate_offspring(self, parent: Program, generation_num: int, child_id: str) -> Optional[
-        Program]:  # Method_v4.1 (Uses updated ancestral summary)
+        Program]:  # Method_v4.2 (Corrected bug_fix_prompt call)
         logger.debug(f"Generating mutation/bug_fix offspring {child_id} from parent {parent.id}")
-        ancestral_summary = await self._get_ancestral_summary_for_llm(parent,
-                                                                      max_depth=3)  # This now includes Ruff info
+        ancestral_summary = await self._get_ancestral_summary_for_llm(parent, max_depth=3)
 
         mutation_prompt_str: str = ""
         prompt_type: str = "mutation"
-        # The parent_program object passed to PromptDesigner will have .errors populated by EvaluatorAgent with Ruff messages
         original_attempt_summary_for_fallback = ""
 
-        # Decide if bug_fix or mutation based on correctness and errors
-        # Errors from Ruff are in parent.errors, execution errors also.
-        # If primary error is an execution error and correctness is low:
-        is_execution_error_dominant = any(not err.lower().startswith("ruff-") for err in parent.errors)
+        # Decide if bug_fix or mutation based on status and errors
+        # The PromptDesignerAgent.design_bug_fix_prompt will internally look at program.status and program.errors
+        # to determine the "Primary Problem".
 
-        if parent.errors and parent.fitness_scores.get("correctness", 1.0) < 0.1 and is_execution_error_dominant:
-            primary_error = next((e for e in parent.errors if not e.lower().startswith("ruff-")), parent.errors[0])
+        # Heuristic: If status indicates a clear failure (not just failed I/O tests but execution/syntax)
+        # or if LLM judge gave a very low score indicating critical flaws.
+        is_critical_failure_status = parent.status in ["failed_evaluation_execution", "failed_evaluation_syntax",
+                                                       "failed_evaluation_internal_critical"]
+        is_very_low_judge_score = parent.fitness_scores.get('llm_judge_overall_score', 10) <= 3  # Example threshold
+
+        if is_critical_failure_status or (parent.llm_judge_feedback and is_very_low_judge_score):
+            logger.info(
+                f"Attempting bug-fix prompt for {parent.id} due to status '{parent.status}' or low judge score.")
+            # --- CORRECTED CALL: Removed error_message and execution_output ---
             mutation_prompt_str = self.prompt_designer.design_bug_fix_prompt(
-                task=self.task_definition, program=parent, error_message=primary_error,
-                execution_output=None,  # Provide if available
+                task=self.task_definition,
+                program=parent,  # PromptDesigner will get error context from here
                 ancestral_summary=ancestral_summary
             )
+            # --- END CORRECTION ---
             prompt_type = "bug_fix"
-            original_attempt_summary_for_fallback = f"Fix bug: '{primary_error}' for task: {self.task_definition.description}"
+            # The original_attempt_summary_for_fallback can be generic or try to infer from parent.errors
+            primary_error_display = parent.errors if parent.errors else "an issue"
+            original_attempt_summary_for_fallback = f"Fix critical issue (e.g., '{primary_error_display[:50]}...') for task: {self.task_definition.description}"
         else:
-            # For mutation, evaluation_feedback arg to design_mutation_prompt is less critical
-            # if parent program object itself is up-to-date with .fitness_scores and .errors
+            logger.info(f"Attempting mutation prompt for {parent.id}.")
             mutation_prompt_str = self.prompt_designer.design_mutation_prompt(
-                task=self.task_definition, parent_program=parent,
-                evaluation_feedback=parent.fitness_scores,  # Pass fitness scores, PromptDesigner can pick what it needs
+                task=self.task_definition,
+                parent_program=parent,
                 ancestral_summary=ancestral_summary
             )
             prompt_type = "mutation"
             original_attempt_summary_for_fallback = f"Improve code for task: {self.task_definition.description}, mode: {self.task_definition.improvement_mode}"
 
         final_code = ""
-        async with self._api_call_semaphore:  # API call rate limiting for diff attempt
+        # --- Rate limiting and API call logic for diff/fallback ---
+        # (Assuming this block is okay, as the error was in the prompt design call)
+        async with self._api_call_semaphore:
             current_time = time.monotonic()
             if current_time - self._last_api_call_release_time < MIN_SECONDS_BETWEEN_CALLS:
                 await asyncio.sleep(MIN_SECONDS_BETWEEN_CALLS - (current_time - self._last_api_call_release_time))
-            final_code = await self.code_generator.execute(
-                prompt=mutation_prompt_str, temperature=settings.TEMPERATURE_MUTATION_DIFF, output_format="diff",
+
+            # First attempt: try to get a diff if it's not a brand new attempt after critical failure
+            # or if the prompt designer didn't already ask for full code.
+            # For simplicity, let's assume the prompt_type from design_x_prompt could indicate if diff is preferred.
+            # Our current mutation/bug_fix prompts *do* ask for diffs.
+
+            temp_generated_output = await self.code_generator.execute(  # Using .execute now
+                prompt=mutation_prompt_str,
+                temperature=settings.TEMPERATURE_MUTATION_DIFF,
+                output_format="diff",  # Requesting diff
                 parent_code_for_diff=parent.code
             )
             self._last_api_call_release_time = time.monotonic()
 
-        diff_failed_heuristic = not final_code.strip() or final_code == parent.code or \
-                                ("<<<<<<< SEARCH" in final_code and ">>>>>>> REPLACE" in final_code and len(
-                                    final_code) < len(parent.code) + 300)
+        # Check if the output is actually a diff or if it's already full code (e.g. LLM ignored diff request)
+        # or if the diff application failed or resulted in no change.
+        # The CodeGeneratorAgent's execute method with output_format="diff" returns the *applied* code.
+        # If it couldn't apply or diff was bad, it might return original or raw diff.
+        # Let's simplify: if the result from a diff request is same as parent or empty, or still looks like a diff, try fallback.
 
-        if diff_failed_heuristic:
-            logger.warning(f"Diff attempt for {child_id} ({prompt_type}) failed or no change. Trying fallback.")
+        # The CodeGeneratorAgent's execute for "diff" already tries to apply it.
+        # If it returns the parent code, it means the diff failed or was empty.
+        if not temp_generated_output.strip() or temp_generated_output == parent.code:
+            logger.warning(
+                f"Diff attempt for {child_id} ({prompt_type}) failed or no change. Trying fallback to full code generation.")
             prompt_type_original = prompt_type
-            prompt_type += "_fallback_full"
+            prompt_type += "_fallback_full"  # Mark that fallback was used
+
             fallback_prompt = self.prompt_designer.design_failed_diff_fallback_prompt(
                 task=self.task_definition, original_program=parent,
                 previous_attempt_summary=original_attempt_summary_for_fallback,
+                # Pass summary of what we tried to fix/improve
                 ancestral_summary=ancestral_summary
             )
             async with self._api_call_semaphore:  # API call rate limiting for fallback
                 current_time = time.monotonic()
                 if current_time - self._last_api_call_release_time < MIN_SECONDS_BETWEEN_CALLS:
                     await asyncio.sleep(MIN_SECONDS_BETWEEN_CALLS - (current_time - self._last_api_call_release_time))
-                final_code = await self.code_generator.execute(
-                    prompt=fallback_prompt, temperature=settings.TEMPERATURE_FALLBACK_FULL, output_format="code"
+                final_code = await self.code_generator.execute(  # Using .execute
+                    prompt=fallback_prompt,
+                    temperature=settings.TEMPERATURE_FALLBACK_FULL,
+                    output_format="code"  # Requesting full code
                 )
                 self._last_api_call_release_time = time.monotonic()
 
             if not final_code.strip() or final_code == parent.code:
                 logger.warning(
-                    f"Fallback full code generation for {child_id} ({prompt_type_original}) also empty or no change. Skipping.")
+                    f"Fallback full code generation for {child_id} ({prompt_type_original}) also empty or no change. Skipping offspring generation.")
                 return None
+        else:  # Diff was presumably successful and applied by CodeGeneratorAgent.execute
+            final_code = temp_generated_output
 
         offspring = Program(id=child_id, code=final_code, generation=generation_num, parent_id=parent.id,
                             parent_ids=[parent.id] if parent.id else [], status="unevaluated",

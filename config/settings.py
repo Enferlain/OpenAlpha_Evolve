@@ -50,7 +50,7 @@ MODEL_FREE_TIER_RPM = {
 EVALUATION_MODEL_NAME = MODEL_GEMINI_2_5_FLASH_PREVIEW # Example
 
 # Evolutionary Parameters (examples)
-POPULATION_SIZE = 10  # Number of individuals in each generation
+POPULATION_SIZE = 1  # Number of individuals in each generation
 GENERATIONS = 10      # Number of generations to run the evolution
 ELITISM_COUNT = 1     # Number of best individuals to carry over to the next generation
 MUTATION_RATE = 0.7   # Probability of mutating an individual
