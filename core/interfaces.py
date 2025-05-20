@@ -24,7 +24,7 @@ class Program:
     """Qualitative textual feedback from the LLM-as-a-reviewer."""
 
     # Note for SolutionEvaluator:
-    # - `fitness_scores` will store 'ai_review_score', 'llm_review_creativity_score' (and others from LLM review)
+    # - `fitness_scores` will store 'ai_review_score', 'ai_review_creativity_score' (and others from LLM review)
     # - `fitness_scores` will also store 'runs_without_error' (bool, or 1.0/0.0 if strictly float needed for sorting keys)
     # - `fitness_scores` continues to store 'ruff_violations', 'runtime_ms', 'correctness' (if applicable), etc.
 

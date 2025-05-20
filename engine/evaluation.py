@@ -644,7 +644,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
     async def _get_ai_review(self,
                                 task: TaskDefinition,
                                 program_to_review: Program,
-                                execution_summary_for_judge: Dict[str, Any]
+                                execution_summary_for_ai_review: Dict[str, Any]
                                 ) -> Tuple[Optional[float], Optional[str]]:
         if not self.prompt_designer or not self.ai_review_model_caller:
             logger.warning(
@@ -659,27 +659,27 @@ print(json.dumps(final_output, default=custom_json_serializer))
         ai_review_prompt = self.prompt_designer.ai_review_prompt(
             task=task,
             program_to_review=program_to_review,
-            execution_summary=execution_summary_for_judge
+            execution_summary=execution_summary_for_ai_review
         )
 
-        raw_judge_response_from_llm = ""
+        raw_ai_review_response_from_llm = ""
         cleaned_response_for_json = ""  # Initialize here
         try:
             logger.info(f"Calling reviewer LLM ({self.ai_reviewer_model_name}) for program {program_to_review.id}...")
-            raw_judge_response_from_llm = await self.ai_review_model_caller.generate_code(
+            raw_ai_review_response_from_llm = await self.ai_review_model_caller.generate_code(
                 prompt=ai_review_prompt,
                 model_name=self.ai_reviewer_model_name,
                 temperature=self.ai_reviewer_temperature,
                 output_format="code"
             )
 
-            if not raw_judge_response_from_llm.strip():
+            if not raw_ai_review_response_from_llm.strip():
                 logger.warning(f"ai review for {program_to_review.id} returned an empty response.")
                 return None, "ai review returned empty response."
 
-            logger.debug(f"Raw response from reviewer LLM for {program_to_review.id}: {raw_judge_response_from_llm}")
+            logger.debug(f"Raw response from reviewer LLM for {program_to_review.id}: {raw_ai_review_response_from_llm}")
 
-            cleaned_response_for_json = raw_judge_response_from_llm.strip()  # Assign here
+            cleaned_response_for_json = raw_ai_review_response_from_llm.strip()  # Assign here
             if cleaned_response_for_json.lower().startswith("json\n"):
                 cleaned_response_for_json = cleaned_response_for_json[5:].strip()
             elif cleaned_response_for_json.lower().startswith("```json\n"):
@@ -690,9 +690,9 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 cleaned_response_for_json = cleaned_response_for_json[3:-3].strip()
 
             logger.debug(f"Attempting to parse cleaned JSON: '{cleaned_response_for_json[:200]}...'")
-            judge_output = json.loads(cleaned_response_for_json)  # This can raise JSONDecodeError
-            score = judge_output.get("overall_score")
-            justification = judge_output.get("justification")
+            ai_review_data = json.loads(cleaned_response_for_json)  # This can raise JSONDecodeError
+            score = ai_review_data.get("overall_score")
+            justification = ai_review_data.get("justification")
 
             if score is None or justification is None:
                 logger.warning(
@@ -704,20 +704,20 @@ print(json.dumps(final_output, default=custom_json_serializer))
         except json.JSONDecodeError as e:
             logger.error(
                 f"Failed to decode JSON from ai review for {program_to_review.id}: {e}. "
-                f"Raw response was: '{raw_judge_response_from_llm}'. "
+                f"Raw response was: '{raw_ai_review_response_from_llm}'. "
                 f"Cleaned attempt was: '{cleaned_response_for_json}'",  # Now always defined
                 exc_info=True)
             return None, f"ai review JSONDecodeError. Cleaned attempt: {cleaned_response_for_json[:200]}"
-        except Exception as e_judge:
-            logger.error(f"Error during ai review invocation for {program_to_review.id}: {e_judge}", exc_info=True)
-            return None, f"ai review invocation error: {type(e_judge).__name__}. Response (if any): {raw_judge_response_from_llm[:200]}"
+        except Exception as e_ai_review:
+            logger.error(f"Error during ai review invocation for {program_to_review.id}: {e_ai_review}", exc_info=True)
+            return None, f"ai review invocation error: {type(e_ai_review).__name__}. Response (if any): {raw_ai_review_response_from_llm[:200]}"
 
     # --- MODIFIED: evaluate_program (Integrate LLM-as-reviewer call) ---
     async def evaluate_program(self, program: Program, task: TaskDefinition) -> Program:
         logger.debug(f"[evaluate_program] Starting for Program ID: {program.id}, Task ID: {task.id}")
         program.status = "evaluating"
         program.errors = [] # Clear previous errors
-        program.ai_review_feedback = None # Clear previous judge feedback
+        program.ai_review_feedback = None # Clear previous ai review feedback
 
         default_scores = {
             "correctness": 0.0, "runtime_ms": float('inf'),
@@ -913,7 +913,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 # Correctness remains default 0, or could be set to 1.0 if no tests means "not failed"
                 # Let's assume correctness 0 if it can't be verified for task_focused.
 
-            # --- 5. LLM-as-a-Judge Invocation (NEW - Blueprint Step 3) ---
+            # --- 5. LLM-as-a-Reviewer Invocation (NEW - Blueprint Step 3) ---
             if program.status not in ["failed_evaluation_syntax"]:
                 # --- REFINED logic for current_exec_summary ---
                 extracted_stdout = ""
@@ -963,15 +963,15 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 }
                 # --- END REFINED logic ---
 
-                judge_score, judge_justification = await self._get_ai_review(
+                review_score, review_justification = await self._get_ai_review(
                     task, program, current_exec_summary
                 )
-                if judge_score is not None:
-                    program.fitness_scores["ai_review_score"] = judge_score
-                if judge_justification is not None:
-                    program.ai_review_feedback = judge_justification
-                if judge_score is None and judge_justification: # If scoring failed but got some feedback
-                    program.errors.append(f"ai review Note: {judge_justification}")
+                if review_score is not None:
+                    program.fitness_scores["ai_review_score"] = review_score
+                if review_justification is not None:
+                    program.ai_review_feedback = review_justification
+                if review_score is None and review_justification: # If scoring failed but got some feedback
+                    program.errors.append(f"ai review Note: {review_justification}")
 
             # --- UNTANGLED AND REFINED Final Status Determination Logic ---
             if program.status == "evaluating":  # Check if status hasn't been set to a critical failure already
@@ -997,7 +997,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
 
             # One final check: if no I/O examples were provided and it's task_focused, status might need adjustment
             # if we didn't set it to a failure above.
-            # If mode is task_focused, no I/O examples provided, and no other critical errors -> it's hard to judge.
+            # If mode is task_focused, no I/O examples provided, and no other critical errors -> it's hard to rate.
             # For now, the logic above would set it to "evaluated" if no critical errors.
             # The `program.errors.append("Evaluation: Task 'task_focused' but no I/O examples for correctness check.")`
             # will be a hint.

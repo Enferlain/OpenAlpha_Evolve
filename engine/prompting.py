@@ -398,7 +398,7 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
         elif program.ai_review_feedback and (program.fitness_scores.get('ai_review_score', 10) <= 3):
             primary_failure_reason = (
                 f"The Ai Reviewer gave a very low score ({program.fitness_scores.get('ai_review_score')}/10) "
-                f"indicating critical flaws. Judge's Justification:\n{program.ai_review_feedback}")
+                f"indicating critical flaws. Ai Reviewer's Justification:\n{program.ai_review_feedback}")
 
         prompt_parts.append(f"### Primary Problem:\n{primary_failure_reason}\n\n")
 
@@ -490,7 +490,7 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
             f"## Your New Goal (Provide Full Code):\n"
             f"Please provide the *complete, fully corrected/improved version* of the solution. "
             f"Your new version must address the objectives from the 'Previous Attempt's Goal' (e.g., critiques from the Ai Reviewer, specific errors, or refinement targets) and incorporate feedback on the 'Original Code'.\n"
-            f"Aim to satisfy the task's 'Evaluation Guidelines' (if provided to the judge previously) or general quality standards.\n\n"
+            f"Aim to satisfy the task's 'Evaluation Guidelines' (if provided to the ai reviewer previously) or general quality standards.\n\n"
             f"Your Response Format:\n"
             f"Provide *only* the complete Python code for the new version. "
             f"No surrounding text, explanations, comments outside the code, or markdown code fences."
@@ -518,7 +518,7 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
             f"Problem Description:\n{task.description}\n\n"
             f"Target Solution Description:\n{task.target_solution if task.target_solution else 'Not explicitly specified, infer from problem description.'}\n\n"
             f"## User's Evaluation Guidelines:\n"
-            f"Please judge the code primarily based on these guidelines:\n{task.ai_review_criteria if task.ai_review_criteria else 'No specific user guidelines provided. Use general principles of good code quality, correctness for the task, and creativity.'}\n\n"
+            f"Please review the code primarily based on these guidelines:\n{task.ai_review_criteria if task.ai_review_criteria else 'No specific user guidelines provided. Use general principles of good code quality, correctness for the task, and creativity.'}\n\n"
             f"## Code for Review:\n```python\n{program_to_review.code}\n```\n\n"
             f"## Observations from Automated Checks:\n{formatted_observations}\n\n"
             f"## Your Evaluation Task:\n"

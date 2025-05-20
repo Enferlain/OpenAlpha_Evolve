@@ -248,7 +248,7 @@ if not programs_df.empty:
                        col in programs_df.columns]
     default_sort = []
     if 'ai_review_score' in sort_by_options: default_sort.append(
-        'ai_review_score')  # Default sort by judge score
+        'ai_review_score')  # Default sort by ai review score
     if 'correctness' in sort_by_options and 'ai_review_score' not in default_sort: default_sort.append(
         'correctness')
 

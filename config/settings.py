@@ -84,7 +84,7 @@ RL_MODEL_PATH = "rl_finetuner_model.pth"
 
 METRIC_OPTIMIZATION_DIRECTION = {
     "correctness": True,  # Higher is better
-    # "pylint_score": True, # Removed Pylint
+    "ai_review_score": True,
     "ruff_violations": False, # Lower is better!
     "maintainability_index": True,
     "passed_tests": True,
@@ -93,7 +93,6 @@ METRIC_OPTIMIZATION_DIRECTION = {
 }
 DEFAULT_METRIC_VALUE = {
     "correctness": 0.0,
-    # "pylint_score": -1.0, # Removed Pylint
     "ruff_violations": float('inf'), # Default to very bad
     "maintainability_index": -1.0,
     "passed_tests": 0.0,

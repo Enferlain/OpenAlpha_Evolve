@@ -51,7 +51,7 @@ class EvolveFlow(TaskManagerInterface):
         self.evaluator: SolutionEvaluatorInterface = SolutionEvaluator(
             task_definition=self.task_definition,
             prompt_designer=self.prompt_designer,  # For designing ai review prompts
-            code_generator_for_=self.code_generator  # For making the call to the LLM
+            ai_review_model_caller=self.code_generator  # For making the call to the LLM
         )
 
         self.database: DatabaseInterface = SQLiteStore()
@@ -451,11 +451,11 @@ class EvolveFlow(TaskManagerInterface):
         # or if ai review gave a very low score indicating critical flaws.
         is_critical_failure_status = parent.status in ["failed_evaluation_execution", "failed_evaluation_syntax",
                                                        "failed_evaluation_internal_critical"]
-        is_very_low_judge_score = parent.fitness_scores.get('ai_review_score', 10) <= 3  # Example threshold
+        is_very_low_review_score = parent.fitness_scores.get('ai_review_score', 10) <= 3  # Example threshold
 
-        if is_critical_failure_status or (parent.ai_review_feedback and is_very_low_judge_score):
+        if is_critical_failure_status or (parent.ai_review_feedback and is_very_low_review_score):
             logger.info(
-                f"Attempting bug-fix prompt for {parent.id} due to status '{parent.status}' or low judge score.")
+                f"Attempting bug-fix prompt for {parent.id} due to status '{parent.status}' or low ai review score.")
             # --- CORRECTED CALL: Removed error_message and execution_output ---
             mutation_prompt_str = self.prompt_designer.bugfix_prompt(
                 task=self.task_definition,

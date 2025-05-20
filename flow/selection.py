@@ -117,7 +117,7 @@ class EvoSelector(SelectionControllerInterface, BaseAgent):
             key_tuple = self._get_program_sort_key(p_val, task)
             formatted_key = tuple(f"{x:.2f}" if isinstance(x, float) else x for x in key_tuple)
             top_program_details.append(
-                f"ID:{p_val.id} Key:{formatted_key} ReviewScore:{p_val.fitness_scores.get('ai_review_score', 'N/A')}")
+                f"ID:{p_val.id} Key:{formatted_key} AIReviewScore:{p_val.fitness_scores.get('ai_review_score', 'N/A')}")
         logger.debug(f"Population sorted for parent selection. Top candidates: [{'; '.join(top_program_details)}]")
 
         parents: List[Program] = []
