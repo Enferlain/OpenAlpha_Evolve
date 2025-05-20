@@ -1,38 +1,36 @@
+# task_manager/task_manager_agent.py
+# Version: 1.1.0 (Adding LLM Judge Score calculation for monitoring)
+
 import logging
 import asyncio
 import random
-import time # For timing generations and total run
+import time
 from typing import List, Dict, Any, Optional, Union
 
 from core.interfaces import (
     TaskManagerInterface, TaskDefinition, Program, BaseAgent,
     PromptDesignerInterface, CodeGeneratorInterface, EvaluatorAgentInterface,
     DatabaseAgentInterface, SelectionControllerInterface,
-    MonitoringAgentInterface # <--- ADD THIS!
+    MonitoringAgentInterface
 )
 from config import settings
-
-# Import concrete agent implementations
 from prompt_designer.prompt_designer_agent import PromptDesignerAgent
 from code_generator.code_generator_agent import CodeGeneratorAgent
+# Ensure EvaluatorAgent is imported if its type hint is used, or adjust if only interface used.
 from evaluator_agent.evaluator_agent import EvaluatorAgent
-from database_agent.database_agent import InMemoryDatabaseAgent  # Using InMemory for now
-from database_agent.sqlite_database_agent import SQLiteDatabaseAgent # New!
+from database_agent.sqlite_database_agent import SQLiteDatabaseAgent
 from selection_controller.selection_controller_agent import SelectionControllerAgent
-from monitoring_agent.monitoring_agent import MonitoringAgent # Import the concrete agent
+from monitoring_agent.monitoring_agent import MonitoringAgent
 
 logger = logging.getLogger(__name__)
 
-# --- Determine RPM and delay based on the currently selected settings.GENERATION_MODEL_NAME ---
-# Look up the RPM in our new dictionary from settings
 SELECTED_MODEL_FOR_GENERATION = settings.GENERATION_MODEL_NAME
 RPM_LIMIT = settings.MODEL_FREE_TIER_RPM.get(
     SELECTED_MODEL_FOR_GENERATION,
-    settings.MODEL_FREE_TIER_RPM["default"] # Use the default fallback if model not found
+    settings.MODEL_FREE_TIER_RPM["default"]
 )
-
-MAX_CONCURRENT_API_CALLS = 1 # Still recommend 1 for simplicity with free tiers
-MIN_SECONDS_BETWEEN_CALLS = 60.0 / RPM_LIMIT if RPM_LIMIT > 0 else 6.0 # Default to 6s if RPM is 0/invalid (conservative)
+MAX_CONCURRENT_API_CALLS = 1
+MIN_SECONDS_BETWEEN_CALLS = 60.0 / RPM_LIMIT if RPM_LIMIT > 0 else 6.0
 
 logger.info(
     f"API Call Management for Model '{SELECTED_MODEL_FOR_GENERATION}': "
@@ -45,30 +43,35 @@ class TaskManagerAgent(TaskManagerInterface):
     def __init__(self, task_definition: TaskDefinition, config: Optional[Dict[str, Any]] = None):
         super().__init__(config)
         self.task_definition = task_definition
+
+        # Initialize agents, ensuring EvaluatorAgent gets PromptDesigner and CodeGenerator for judge calls
         self.prompt_designer: PromptDesignerInterface = PromptDesignerAgent(task_definition=self.task_definition)
         self.code_generator: CodeGeneratorInterface = CodeGeneratorAgent()
-        self.evaluator: EvaluatorAgentInterface = EvaluatorAgent(task_definition=self.task_definition)
-        # self.database: DatabaseAgentInterface = InMemoryDatabaseAgent()
-        self.database: DatabaseAgentInterface = SQLiteDatabaseAgent()  # New!
-        self.selection_controller: SelectionControllerInterface = SelectionControllerAgent()
-        self.monitoring_agent: MonitoringAgentInterface = MonitoringAgent() # Initialize MonitoringAgent
 
-        self.crossover_rate = settings.CROSSOVER_RATE # e.g., 0.2 from settings
-        self.min_parents_for_crossover = 2 # Typically 2
+        # Pass the necessary agents to EvaluatorAgent for LLM-as-Judge
+        self.evaluator: EvaluatorAgentInterface = EvaluatorAgent(
+            task_definition=self.task_definition,
+            prompt_designer=self.prompt_designer,  # For designing judge prompts
+            code_generator_for_judge=self.code_generator  # For making the call to the judge LLM
+        )
+
+        self.database: DatabaseAgentInterface = SQLiteDatabaseAgent()
+        self.selection_controller: SelectionControllerInterface = SelectionControllerAgent()
+        self.monitoring_agent: MonitoringAgentInterface = MonitoringAgent()
+
+        self.crossover_rate = settings.CROSSOVER_RATE
+        self.min_parents_for_crossover = 2
 
         self._api_call_semaphore = asyncio.Semaphore(MAX_CONCURRENT_API_CALLS)
-        self._last_api_call_release_time = 0.0 # Initialize as float
+        self._last_api_call_release_time = 0.0
 
         self.population_size = settings.POPULATION_SIZE
         self.num_generations = settings.GENERATIONS
-        # Calculate num_parents_to_select after potential CLI overrides to population_size
-        # This should ideally be done just before starting the evolutionary cycle or passed around.
-        # For now, this existing logic is fine as CLI overrides happen in main.py before TaskManager init.
         self.num_parents_to_select = self.population_size // 2
         if self.num_parents_to_select < settings.ELITISM_COUNT and self.population_size >= settings.ELITISM_COUNT:
-            self.num_parents_to_select = settings.ELITISM_COUNT # Ensure enough parents for elitism if pop allows
+            self.num_parents_to_select = settings.ELITISM_COUNT
         elif self.num_parents_to_select == 0 and self.population_size > 0:
-             self.num_parents_to_select = 1 # Need at least one parent if population exists
+            self.num_parents_to_select = 1
 
         self.start_time_overall_run: Optional[float] = None
 
@@ -165,22 +168,25 @@ class TaskManagerAgent(TaskManagerInterface):
             f"Initialized population with {len(initial_population)} programs. Their creation_methods are now set!")
         return initial_population
 
-    # --- MODIFIED: _calculate_population_metrics (v1.1.0 for Ruff, as provided before) ---
-    def _calculate_population_metrics(self, population: List[Program]) -> Dict[str, Any]: # Method_v1.1.0
-        """Calculates summary statistics for a population, now for Ruff."""
+    # --- MODIFIED: _calculate_population_metrics (Blueprint Step 6 - Final part) ---
+    def _calculate_population_metrics(self, population: List[Program]) -> Dict[str, Any]: # Method_v1.2.0
+        """Calculates summary statistics for a population, including LLM Judge scores."""
         if not population:
-            return {
+            return { # Return defaults for all expected metrics by MonitoringAgent
                 "avg_correctness": 0.0, "best_correctness": 0.0,
-                "avg_ruff_violations": float('inf'), "min_ruff_violations": float('inf'), # Ruff init
+                "avg_ruff_violations": float('inf'), "min_ruff_violations": float('inf'),
+                "avg_llm_judge_score": settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0), # NEW
+                "best_llm_judge_score": settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0), # NEW
                 "avg_runtime_ms": float('inf'), "best_runtime_ms": float('inf'),
                 "avg_cyclomatic_complexity": float('inf'), "best_cyclomatic_complexity": float('inf'),
-                "avg_maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", 0.0), # Use default from settings
+                "avg_maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", 0.0),
                 "best_maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", 0.0),
             }
 
-        metrics_data = { # Renamed from 'metrics' to 'metrics_data' to avoid conflict if a metric is named 'metrics'
+        metrics_data = {
             "correctness": [],
             "ruff_violations": [],
+            "llm_judge_overall_score": [], # NEW list for LLM judge scores
             "runtime_ms": [],
             "cyclomatic_complexity_avg": [],
             "maintainability_index": []
@@ -191,34 +197,40 @@ class TaskManagerAgent(TaskManagerInterface):
         for prog in evaluated_programs:
             metrics_data["correctness"].append(prog.fitness_scores.get("correctness", 0.0))
             metrics_data["ruff_violations"].append(prog.fitness_scores.get("ruff_violations", float('inf')))
+            # --- NEW: Collect LLM Judge Scores ---
+            metrics_data["llm_judge_overall_score"].append(
+                prog.fitness_scores.get("llm_judge_overall_score", settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0))
+            )
+            # --- END NEW ---
             metrics_data["runtime_ms"].append(prog.fitness_scores.get("runtime_ms", float('inf')))
             metrics_data["cyclomatic_complexity_avg"].append(
                 prog.fitness_scores.get("cyclomatic_complexity_avg", float('inf')))
             metrics_data["maintainability_index"].append(prog.fitness_scores.get("maintainability_index",
                                                                             settings.DEFAULT_METRIC_VALUE.get("maintainability_index", 0.0)))
 
-        def safe_avg(values: List[Union[float, int]], default_val=0.0) -> float: # Type hint for values
+        def safe_avg(values: List[Union[float, int]], default_val=0.0) -> float:
             valid_values = [v for v in values if isinstance(v, (int, float)) and v != float('inf') and v != float('-inf') and not (isinstance(v, float) and v != v)]
             return sum(valid_values) / len(valid_values) if valid_values else default_val
 
         def safe_min(values: List[Union[float, int]], default_val=float('inf')) -> float:
-            valid_values = [v for v in values if isinstance(v, (int, float)) and not (isinstance(v, float) and v != v)] # Exclude NaN, keep inf unless default needed
+            valid_values = [v for v in values if isinstance(v, (int, float)) and not (isinstance(v, float) and v != v)]
             if not valid_values: return default_val
             return min(valid_values) if any(v != float('inf') for v in valid_values) else default_val
 
-
         def safe_max(values: List[Union[float, int]], default_val=0.0) -> float:
-            valid_values = [v for v in values if isinstance(v, (int, float)) and v != float('-inf') and not (isinstance(v, float) and v != v)] # Exclude NaN, keep -inf unless default needed
+            valid_values = [v for v in values if isinstance(v, (int, float)) and v != float('-inf') and not (isinstance(v, float) and v != v)]
             if not valid_values: return default_val
-            # If all are float('-inf'), max will be float('-inf'). If list is empty, default_val.
             return max(valid_values) if any(v != float('-inf') for v in valid_values) else default_val
-
 
         summary = {
             "avg_correctness": safe_avg(metrics_data["correctness"]),
             "best_correctness": safe_max(metrics_data["correctness"]),
             "avg_ruff_violations": safe_avg(metrics_data["ruff_violations"], default_val=float('inf')),
-            "min_ruff_violations": safe_min(metrics_data["ruff_violations"]), # Min violations is best
+            "min_ruff_violations": safe_min(metrics_data["ruff_violations"]),
+            # --- NEW: Calculate Avg and Best LLM Judge Scores ---
+            "avg_llm_judge_score": safe_avg(metrics_data["llm_judge_overall_score"], default_val=settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0)),
+            "best_llm_judge_score": safe_max(metrics_data["llm_judge_overall_score"], default_val=settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0)),
+            # --- END NEW ---
             "avg_runtime_ms": safe_avg(metrics_data["runtime_ms"], default_val=float('inf')),
             "best_runtime_ms": safe_min(metrics_data["runtime_ms"]),
             "avg_cyclomatic_complexity": safe_avg(metrics_data["cyclomatic_complexity_avg"], default_val=float('inf')),
@@ -226,7 +238,9 @@ class TaskManagerAgent(TaskManagerInterface):
             "avg_maintainability_index": safe_avg(metrics_data["maintainability_index"], default_val=settings.DEFAULT_METRIC_VALUE.get("maintainability_index", 0.0)),
             "best_maintainability_index": safe_max(metrics_data["maintainability_index"], default_val=settings.DEFAULT_METRIC_VALUE.get("maintainability_index", 0.0)),
         }
+        logger.debug(f"Calculated population metrics: {summary}")
         return summary
+
 
     async def evaluate_population(self, population: List[Program]) -> List[Program]:
         logger.info(f"Evaluating population of {len(population)} programs.")

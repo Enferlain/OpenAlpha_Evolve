@@ -1,9 +1,11 @@
+# selection_controller/selection_controller_agent.py
+# Version: 1.1.1 (Corrected potential editor misinterpretation of list.append)
+
 import random
 import logging
-from typing import List, Dict, Any, Optional, Tuple # Added Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 
-# We need TaskDefinition if we're going to make decisions based on it.
-from core.interfaces import SelectionControllerInterface, Program, BaseAgent, TaskDefinition # Added TaskDefinition_v2
+from core.interfaces import SelectionControllerInterface, Program, BaseAgent, TaskDefinition
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -11,86 +13,101 @@ logger = logging.getLogger(__name__)
 
 class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
     def __init__(self):
-        super().__init__()  # Call BaseAgent's __init__
+        super().__init__()
         self.elitism_count = settings.ELITISM_COUNT
         logger.info(f"SelectionControllerAgent initialized with elitism_count: {self.elitism_count}")
 
-    # Method_v3 (Updated for Ruff, ensuring lower ruff_violations is better)
-    def _get_program_sort_key(self, program: Program, task: TaskDefinition) -> Tuple:
+    # --- MODIFIED: _get_program_sort_key (Blueprint Step 5) ---
+    def _get_program_sort_key(self, program: Program, task: TaskDefinition) -> Tuple:  # Method_v4.0.1
         """
         Creates a sort key for a program. Higher tuple values mean "better" for sorting (reverse=True).
-        Primary: Correctness (higher is better)
-        Secondary: Ruff Violations (lower is better, so we use -violations)
-        Tertiary: Primary Focus Metrics from TaskDefinition (handled based on their optimization direction)
-        Default Tie-breakers: Runtime (lower is better, so -runtime), Generation (higher is better)
+        Priority:
+        1. runs_without_error (True is infinitely better)
+        2. llm_judge_overall_score (higher is better)
+        3. correctness (I/O tests, higher is better)
+        4. -ruff_violations (lower is better)
+        5. Primary Focus Metrics from TaskDefinition
+        6. Default Tie-breakers: -runtime_ms (lower is better), generation (higher is better)
         """
-        key_parts = []
+        key_parts: List[Union[float, int]] = []  # Explicitly type hint as list of numbers
 
-        # 1. Correctness (higher is better)
+        # 1. Did it run without error?
+        runs_ok_score = 1.0 if program.fitness_scores.get("runs_without_error", False) else 0.0
+        key_parts.append(runs_ok_score)
+
+        # 2. LLM Judge Overall Score
+        llm_judge_score = program.fitness_scores.get(
+            "llm_judge_overall_score",
+            settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0)
+        )
+        key_parts.append(llm_judge_score)
+
+        # 3. Correctness
         correctness = program.fitness_scores.get("correctness", settings.DEFAULT_METRIC_VALUE.get("correctness", 0.0))
         key_parts.append(correctness)
 
-        # 2. Ruff Violations (lower is better)
-        # To sort descending by "goodness" (reverse=True later), and lower ruff_violations is better,
-        # we use -ruff_violations. E.g., 0 violations -> key part 0; 5 violations -> key part -5.
-        # When sorted descending, 0 comes before -5.
+        # 4. Ruff Violations
         ruff_violations = program.fitness_scores.get("ruff_violations",
                                                      settings.DEFAULT_METRIC_VALUE.get("ruff_violations", float('inf')))
-        key_parts.append(-ruff_violations)
+        key_parts.append(-ruff_violations if ruff_violations != float('inf') else -999999.0)
 
-        # 3. Primary Focus Metrics from TaskDefinition
+        # 5. Primary Focus Metrics from TaskDefinition
         if task.primary_focus_metrics:
             for metric_name in task.primary_focus_metrics:
-                # Skip metrics already explicitly handled above to avoid double-counting/weighting
-                if metric_name in ["correctness", "ruff_violations"]:
+                if metric_name in ["runs_without_error", "llm_judge_overall_score", "correctness", "ruff_violations"]:
                     continue
 
                 value = program.fitness_scores.get(metric_name, settings.DEFAULT_METRIC_VALUE.get(metric_name, 0.0))
-                # METRIC_OPTIMIZATION_DIRECTION: True if higher is better, False if lower is better
                 higher_is_better = settings.METRIC_OPTIMIZATION_DIRECTION.get(metric_name, True)
 
                 if higher_is_better:
-                    key_parts.append(value)  # Add directly, reverse=True will handle descending sort
+                    # This append call is correct.
+                    key_parts.append(value if isinstance(value, (int, float)) else 0.0)
                 else:  # Lower is better
-                    key_parts.append(
-                        -value)  # Negate so that smaller actual values result in larger key components for descending sort
+                    if value == float('inf'):
+                        # This append call is correct.
+                        key_parts.append(-999999.0)
+                    elif isinstance(value, (int, float)):
+                        # This append call is correct.
+                        key_parts.append(-value)
+                    else:
+                        # This append call is correct.
+                        key_parts.append(0.0)  # Fallback for unexpected type
 
-        # 4. Default tie-breakers (if not already primary focus metrics)
-        # Runtime (lower is better)
-        if "runtime_ms" not in (task.primary_focus_metrics or []):  # Avoid double-counting
+        # 6. Default tie-breakers
+        # Runtime
+        if "runtime_ms" not in (task.primary_focus_metrics or []):
             runtime = program.fitness_scores.get("runtime_ms",
                                                  settings.DEFAULT_METRIC_VALUE.get("runtime_ms", float('inf')))
-            key_parts.append(-runtime)  # Negate for descending sort of "goodness"
+            key_parts.append(-runtime if runtime != float('inf') else -999999.0)
 
-        # Generation (higher is better - favors newer solutions in ties)
-        # This helps ensure that if all else is equal, newer programs might be preferred slightly.
-        key_parts.append(program.generation)
+        # Generation
+        key_parts.append(program.generation)  # This is an int, append is fine.
 
-        # Debug log for clarity during development
+        # Final numeric conversion was removed as appends now ensure numeric types or handle fallbacks.
         # logger.debug(
         #     f"ProgID: {program.id}, Gen: {program.generation}, "
-        #     f"Correctness: {correctness:.2f}, RuffV: {ruff_violations}, "
-        #     f"Runtime: {program.fitness_scores.get('runtime_ms', 'N/A')}, "
-        #     f"Sort Key: {key_parts}"
+        #     f"RunsOK: {runs_ok_score}, Judge: {llm_judge_score:.1f}, Correct: {correctness:.2f}, RuffV: {ruff_violations}, "
+        #     f"Sort Key: {key_parts}" # key_parts is now guaranteed to be list of numbers
         # )
         return tuple(key_parts)
 
-    def sort_programs(self, programs: List[Program], task: TaskDefinition) -> List[
-        Program]:  # Method_v3.1 (Uses updated _get_program_sort_key)
+    # sort_programs, select_parents, select_survivors, and execute methods remain as in Version 1.1.0
+    # (as they rely on _get_program_sort_key which is now corrected)
+
+    def sort_programs(self, programs: List[Program], task: TaskDefinition) -> List[Program]:
         if not programs:
             return []
-        # Sorts programs. reverse=True means programs with "better" (larger) key tuples come first.
         return sorted(
             programs,
             key=lambda p: self._get_program_sort_key(p, task),
             reverse=True
         )
 
-    def select_parents(self, population: List[Program], num_parents: int, task: TaskDefinition) -> List[
-        Program]:  # Method_v2.1 (Uses updated sort_programs)
+    def select_parents(self, population: List[Program], num_parents: int, task: TaskDefinition) -> List[Program]:
         logger.info(
-            f"Starting parent selection. Pop size: {len(population)}, Num parents to select: {num_parents}, Task Mode: {task.improvement_mode}")
-
+            f"Starting parent selection. Pop size: {len(population)}, Num parents to select: {num_parents}, Task Mode: {task.improvement_mode}"
+        )
         if not population:
             logger.warning("Parent selection called with empty population. Returning empty list.")
             return []
@@ -98,19 +115,18 @@ class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
             logger.info("Number of parents to select is 0. Returning empty list.")
             return []
 
-        # Sort population by fitness using the centralized sort_programs method
         sorted_population = self.sort_programs(population, task)
 
-        # Log top few for debugging, if needed
-        # top_program_ids_and_keys = [(p.id, self._get_program_sort_key(p, task)) for p in sorted_population[:min(5, len(sorted_population))]]
-        # logger.debug(f"Population sorted for parent selection. Top candidates (IDs, SortKey): {top_program_ids_and_keys}")
+        top_program_details = []
+        for p_idx, p_val in enumerate(sorted_population[:min(5, len(sorted_population))]):
+            key_tuple = self._get_program_sort_key(p_val, task)
+            formatted_key = tuple(f"{x:.2f}" if isinstance(x, float) else x for x in key_tuple)
+            top_program_details.append(
+                f"ID:{p_val.id} Key:{formatted_key} JudgeScore:{p_val.fitness_scores.get('llm_judge_overall_score', 'N/A')}")
+        logger.debug(f"Population sorted for parent selection. Top candidates: [{'; '.join(top_program_details)}]")
 
         parents: List[Program] = []
-
-        # 1. Elitism: Select the top N unique individuals based on the sort order
-        # Elitism_count should not exceed num_parents or available population
         actual_elitism_count = min(self.elitism_count, num_parents, len(sorted_population))
-
         elite_candidates = sorted_population[:actual_elitism_count]
         parents.extend(elite_candidates)
         logger.info(f"Selected {len(elite_candidates)} elite parents: {[p.id for p in elite_candidates]}")
@@ -118,69 +134,57 @@ class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
         remaining_slots = num_parents - len(parents)
         if remaining_slots <= 0:
             logger.info("Elitism filled all parent slots or no more parents needed.")
-            return parents  # Return only elites if they fill all slots
+            return parents
 
-        # Candidates for further selection (non-elite part of sorted_population)
-        # Make sure not to re-select elites if roulette_candidates come from the full sorted_population
         roulette_candidate_pool = [p for p in sorted_population if p not in parents]
-
         if not roulette_candidate_pool:
             logger.warning("No candidates left for further selection after elitism. Returning current elite parents.")
             return parents
 
-        # Fitness-Proportionate Selection (Roulette Wheel) for remaining slots
-        # Using 'correctness' for roulette simplicity, as multi-objective is complex for roulette.
-        # Add a small epsilon to fitness to handle zero-fitness individuals if all are zero.
-        fitness_values_roulette = [p.fitness_scores.get("correctness", 0.0) + 0.0001 for p in roulette_candidate_pool]
-        total_fitness_roulette = sum(fitness_values_roulette)
+        fitness_values_for_roulette = []
+        for p_roulette in roulette_candidate_pool:
+            score = p_roulette.fitness_scores.get("llm_judge_overall_score")
+            if score is None:
+                score = p_roulette.fitness_scores.get("correctness", 0.0)
+            fitness_values_for_roulette.append(max(score, 0.0) + 0.0001)
 
+        total_fitness_roulette = sum(fitness_values_for_roulette)
         logger.debug(
-            f"Total 'correctness' fitness for roulette wheel (among {len(roulette_candidate_pool)} candidates): {total_fitness_roulette:.4f}")
+            f"Total fitness for roulette wheel (among {len(roulette_candidate_pool)} candidates, using LLM judge score or correctness): {total_fitness_roulette:.4f}")
 
-        if total_fitness_roulette <= (0.0001 * len(roulette_candidate_pool)) + 1e-9:  # Handles all effectively zero
+        if total_fitness_roulette <= (0.0001 * len(roulette_candidate_pool)) + 1e-9:
             logger.warning(
-                "All roulette candidates have effectively zero correctness. Selecting randomly from them for remaining slots.")
+                "All roulette candidates have effectively zero fitness for roulette. Selecting randomly from them.")
             num_to_select_randomly = min(remaining_slots, len(roulette_candidate_pool))
             if num_to_select_randomly > 0:
                 random_parents_from_pool = random.sample(roulette_candidate_pool, num_to_select_randomly)
                 parents.extend(random_parents_from_pool)
-                logger.info(f"Selected {len(random_parents_from_pool)} parents randomly due to zero total correctness.")
+                logger.info(f"Selected {len(random_parents_from_pool)} parents randomly due to zero total fitness.")
         else:
             for _ in range(remaining_slots):
-                if not roulette_candidate_pool: break  # No more candidates
-
+                if not roulette_candidate_pool: break
                 pick = random.uniform(0, total_fitness_roulette)
                 current_sum_for_pick = 0
                 chosen_parent_for_slot = None
-
-                # Iterate through candidates and their fitness for roulette pick
-                for idx, program in enumerate(roulette_candidate_pool):
-                    current_sum_for_pick += fitness_values_roulette[idx]
+                for idx, program_in_pool in enumerate(roulette_candidate_pool):
+                    current_sum_for_pick += fitness_values_for_roulette[idx]
                     if current_sum_for_pick >= pick:
-                        chosen_parent_for_slot = program
+                        chosen_parent_for_slot = program_in_pool
                         break
-
                 if chosen_parent_for_slot:
                     parents.append(chosen_parent_for_slot)
-                    # Optional: if sampling without replacement from roulette_candidate_pool, remove it here
-                    # and adjust total_fitness_roulette and fitness_values_roulette.
-                    # For simplicity, this example does sampling with replacement from the pool for each slot.
-                else:  # Fallback (should be rare if total_fitness > 0)
-                    if roulette_candidate_pool:  # Ensure pool is not empty
-                        logger.debug("Roulette pick fallback: choosing random from pool.")
-                        parents.append(random.choice(roulette_candidate_pool))
+                elif roulette_candidate_pool:
+                    logger.debug("Roulette pick fallback (should be rare): choosing random from pool.")
+                    parents.append(random.choice(roulette_candidate_pool))
 
-        # Ensure we don't exceed num_parents due to any logic edge cases (though above should handle it)
         final_parents = parents[:num_parents]
         logger.info(f"Total parents selected: {len(final_parents)}. IDs: {[p.id for p in final_parents]}")
         return final_parents
 
     def select_survivors(self, current_population: List[Program], offspring_population: List[Program],
-                         population_size: int, task: TaskDefinition) -> List[
-        Program]:  # Method_v2.1 (Uses updated sort_programs)
+                         population_size: int, task: TaskDefinition) -> List[Program]:
         logger.info(
             f"Starting survivor selection. Current pop: {len(current_population)}, Offspring pop: {len(offspring_population)}, Target pop_size: {population_size}")
-
         combined_population = current_population + offspring_population
         logger.debug(f"Combined population size for survivor selection: {len(combined_population)}")
 
@@ -188,28 +192,24 @@ class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
             logger.warning("Survivor selection called with empty combined population. Returning empty list.")
             return []
 
-        # Sort the combined population by fitness (higher key value is better)
         sorted_combined_population = self.sort_programs(combined_population, task)
 
-        # Select the top 'population_size' individuals
-        # Using a set to ensure uniqueness of program IDs if there's any chance of duplicates
-        # (though program IDs should generally be unique from generation process).
         survivors: List[Program] = []
         seen_ids_for_survivors = set()
-        for program in sorted_combined_population:
+        for program_in_sorted_list in sorted_combined_population:
             if len(survivors) < population_size:
-                if program.id not in seen_ids_for_survivors:
-                    survivors.append(program)
-                    seen_ids_for_survivors.add(program.id)
+                if program_in_sorted_list.id not in seen_ids_for_survivors:
+                    survivors.append(program_in_sorted_list)
+                    seen_ids_for_survivors.add(program_in_sorted_list.id)
             else:
-                break  # Reached desired population size
+                break
 
         logger.info(f"Selected {len(survivors)} survivors. IDs: {[p.id for p in survivors]}")
         return survivors
 
-    async def execute(self, action: str, **kwargs) -> Any:  # Unchanged from your previous structure
+    async def execute(self, action: str, **kwargs) -> Any:
         task = kwargs.get('task')
-        if not isinstance(task, TaskDefinition):  # Make sure task is always provided for selection methods
+        if not isinstance(task, TaskDefinition):
             raise ValueError("A TaskDefinition object must be provided in kwargs as 'task' for selection operations.")
 
         if action == "select_parents":
@@ -225,7 +225,7 @@ class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
             if current_population is None or offspring_population is None or population_size is None:
                 raise ValueError("Missing arguments for 'select_survivors' action.")
             return self.select_survivors(current_population, offspring_population, population_size, task)
-        elif action == "sort_programs":  # Added this action if TaskManager needs to sort externally
+        elif action == "sort_programs":
             programs_to_sort = kwargs.get('programs')
             if programs_to_sort is None:
                 raise ValueError("Missing 'programs' for 'sort_programs' action.")

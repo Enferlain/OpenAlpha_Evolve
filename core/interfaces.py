@@ -106,9 +106,11 @@ class PromptDesignerInterface(BaseAgent):
         pass
 
     @abstractmethod
-    def design_mutation_prompt(self, task: TaskDefinition, parent_program: Program,
-                               evaluation_feedback: Optional[Dict] = None, # evaluation_feedback might be less direct now
-                               ancestral_summary: Optional[List[Dict[str, Any]]] = None) -> str:
+    def design_mutation_prompt(self,
+                               task: TaskDefinition,
+                               parent_program: Program, # Main source of feedback
+                               ancestral_summary: Optional[List[Dict[str, Any]]] = None
+                               ) -> str:
         pass
 
     @abstractmethod
@@ -117,9 +119,11 @@ class PromptDesignerInterface(BaseAgent):
         pass
 
     @abstractmethod
-    def design_bug_fix_prompt(self, task: TaskDefinition, program: Program, error_message: str,
-                              execution_output: Optional[str] = None,
-                              ancestral_summary: Optional[List[Dict[str, Any]]] = None) -> str:
+    def design_bug_fix_prompt(self,
+                              task: TaskDefinition,
+                              program: Program, # Main source of error/feedback context
+                              ancestral_summary: Optional[List[Dict[str, Any]]] = None
+                              ) -> str:
         pass
 
     @abstractmethod

@@ -67,24 +67,54 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
         return "Brief History of Recent Ancestors (to consider and avoid repeating less successful paths):\n" + "\n".join(
             history_lines) + "\n\n"
 
-    def design_initial_prompt(self, task: TaskDefinition) -> str:  # Added task: TaskDefinition _v3
-        logger.info(f"Designing initial prompt for task: {task.id}")
-        prompt = (
-            f"You are an expert Python programmer. Your task is to write a Python function based on the following specifications.\n\n"
-            f"Task Description: {task.description}\n\n"  # Use task.description
-            f"Function to Implement: `{task.function_name_to_evolve}`\n\n"  # Use task.function_name_to_evolve
-            f"Input/Output Examples:\n"
-            # We need to call _format_input_output_examples with the 'task' object
-            # or modify _format_input_output_examples to take 'task'
-            f"{self._format_input_output_examples(task)}\n\n"  # Pass task here _v3
-            f"Evaluation Criteria: {task.evaluation_criteria}\n\n"  # Use task.evaluation_criteria
-            f"Allowed Standard Library Imports: {task.allowed_imports}. Do not use any other external libraries or packages.\n\n"  # Use task.allowed_imports
+    def design_initial_prompt(self, task: TaskDefinition) -> str:  # Method_v_blueprint_1.0.0
+        logger.info(f"Designing initial prompt for task: {task.id} (Blueprint Aligned)")
+
+        prompt_parts = [
+            f"You are an expert and creative Python programmer. Your goal is to develop a solution based on the following high-level description and requirements.\n\n"
+            f"## Overall Goal & Context:\n{task.description}\n\n"
+        ]
+
+        if task.target_solution_description:
+            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution_description}\n\n")
+        elif task.function_name_to_evolve:  # Fallback or hint if no target_solution_description
+            prompt_parts.append(
+                f"## Primary Function to Implement (if applicable):\n`{task.function_name_to_evolve}`\n\n")
+
+        if task.initial_seed_code_or_ideas:
+            prompt_parts.append(
+                f"## Starting Point (Seed Code or Ideas to Build Upon/Consider):\n"
+                f"```text\n{task.initial_seed_code_or_ideas}\n```\n\n"  # Use text block for ideas too
+            )
+
+        if task.suggested_imports:
+            prompt_parts.append(
+                f"Suggested Python libraries you might find useful (not strict constraints unless implied by the task): {', '.join(task.suggested_imports)}.\n\n")
+        elif task.allowed_imports:  # If only old allowed_imports is used, treat as suggestions
+            prompt_parts.append(
+                f"Consider using these standard libraries if helpful: {', '.join(task.allowed_imports)}.\n\n")
+
+        # Mention how it will be evaluated
+        if task.evaluation_guidelines_for_llm_judge:
+            prompt_parts.append(
+                f"## Evaluation Focus:\nYour solution will be primarily evaluated by an AI Judge based on the following guidelines. Strive to meet these criteria:\n"
+                f"{task.evaluation_guidelines_for_llm_judge}\n\n"
+            )
+        elif task.input_output_examples:  # Fallback to I/O examples if no LLM judge guidelines
+            formatted_examples = self._format_input_output_examples(task)
+            prompt_parts.append(
+                f"## Evaluation Focus:\nYour solution will be evaluated for correctness based on input/output examples like these:\n{formatted_examples}\n\n"
+            )
+
+        prompt_parts.append(
             f"Your Response Format:\n"
-            f"Please provide *only* the complete Python code for the function `{task.function_name_to_evolve}`. "
-            f"The code should be self-contained or rely only on the allowed imports. "
-            f"Do not include any surrounding text, explanations, comments outside the function, or markdown code fences (like ```python or ```)."
+            f"Please provide *only* the complete Python code for the solution. "
+            f"The code should be self-contained or rely on the suggested imports if appropriate. "
+            f"Do not include any surrounding text, explanations, comments outside the code structure, or markdown code fences (like ```python or ```)."
         )
-        logger.debug(f"Designed initial prompt:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
+
+        prompt = "".join(prompt_parts)
+        logger.debug(f"Designed blueprint-aligned initial prompt:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
     def _format_execution_summary_for_judge_prompt(self,
@@ -126,45 +156,60 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             return "No specific automated check observations were provided."
         return "\n".join(parts)
 
-    # Modified: design_crossover_prompt (no direct Ruff feedback to LLM, but parents' general quality matters)
-    def design_crossover_prompt(self, task: TaskDefinition, parent_program1: Program, parent_program2: Program) -> str: # v1.0.1 (minor logging)
-        logger.info(f"Designing crossover prompt for task: {task.id} using parents {parent_program1.id} and {parent_program2.id}")
-        # For crossover, we might not explicitly list Ruff errors of parents, but the LLM
-        # should still aim for high quality. The prompt implies combining "best features".
-        # If parents had Ruff errors, their "fitness_scores" reflect that indirectly.
+    def design_crossover_prompt(self, task: TaskDefinition, parent_program1: Program,
+                                parent_program2: Program) -> str:  # Method_v_blueprint_1.0.0
+        logger.info(
+            f"Designing blueprint-aligned crossover prompt for task: {task.id} using parents {parent_program1.id} and {parent_program2.id}")
 
-        # Helper to format parent info concisely (could include a very brief quality note if desired)
-        def format_parent_info(parent_prog: Program, number: int) -> str:
-            # Simplified: just code. If detailed feedback per parent is needed here, it can be added.
-            return (
-                f"--- Parent {number} (ID: {parent_prog.id}, Gen: {parent_prog.generation}) ---\n"
-                f"Code:\n```python\n{parent_prog.code}\n```\n"
-                # If we want to give summary of parent's quality:
-                # f"Note: Parent {number} had {parent_prog.fitness_scores.get('ruff_violations',0)} Ruff issues and {parent_prog.fitness_scores.get('correctness',0)*100:.0f}% correctness.\n"
+        def format_parent_info_for_crossover(parent_prog: Program, number: int) -> str:
+            parts = [
+                f"--- Parent {number} (ID: {parent_prog.id}, Gen: {parent_prog.generation}) ---",
+                f"Code:\n```python\n{parent_prog.code}\n```"
+            ]
+            if parent_prog.llm_judge_feedback:
+                parts.append(
+                    f"Parent {number} AI Judge Assessment (Score: {parent_prog.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n{parent_prog.llm_judge_feedback}"
+                )
+            # Add brief summary of other key metrics if desired
+            # ruff_v = parent_prog.fitness_scores.get('ruff_violations', 'N/A')
+            # correctness_v = parent_prog.fitness_scores.get('correctness', -1.0) * 100
+            # parts.append(f"Parent {number} Stats: Ruff Issues: {ruff_v}, I/O Correctness: {correctness_v if correctness_v >=0 else 'N/A'}%.")
+            return "\n".join(parts) + "\n"
+
+        parent1_info = format_parent_info_for_crossover(parent_program1, 1)
+        parent2_info = format_parent_info_for_crossover(parent_program2, 2)
+
+        prompt_parts = [
+            f"You are an expert Python programmer specializing in synthesizing optimal solutions by combining ideas.\n"
+            f"Your task is to perform a 'genetic crossover' on two parent Python solutions to create a new, potentially superior child solution.\n\n"
+            f"## Overall Goal & Context:\n{task.description}\n"
+        ]
+        if task.target_solution_description:
+            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution_description}\n")
+        if task.evaluation_guidelines_for_llm_judge:
+            prompt_parts.append(
+                f"## Primary Evaluation Guidelines for Child (Aim to excel here):\n{task.evaluation_guidelines_for_llm_judge}\n"
             )
-        parent1_info = format_parent_info(parent_program1, 1)
-        parent2_info = format_parent_info(parent_program2, 2)
+        prompt_parts.append("\n")
 
-        prompt = (
-            f"You are an expert Python programmer specializing in synthesizing optimal solutions.\n"
-            f"Your task is to perform a 'genetic crossover' on two parent Python functions to create a new, potentially superior child function.\n\n"
-            f"Overall Task Description: {task.description}\n"
-            f"Function to Evolve: `{task.function_name_to_evolve}`\n"
-            f"Allowed Standard Library Imports: {task.allowed_imports}. Do not use any other external libraries or packages.\n\n"
-            f"{parent1_info}\n"
-            f"{parent2_info}\n"
+        prompt_parts.append(parent1_info)
+        prompt_parts.append(parent2_info)
+
+        prompt_parts.append(
             f"--- Crossover Instructions ---\n"
-            f"Analyze both Parent 1 and Parent 2. Your goal is to create a NEW child function that:\n"
-            f"1. Solves the 'Overall Task Description' effectively.\n"
-            f"2. Combines the best features, logic, or approaches from *both* parent functions.\n"
-            f"3. Aims for high code quality (e.g., few static analysis issues, good readability, efficiency).\n"
-            f"4. Adheres to the specified `function_name_to_evolve` and `allowed_imports`.\n\n"
+            f"Analyze both Parent 1 and Parent 2, including their code and any AI Judge assessments.\n"
+            f"Your goal is to create a NEW child solution that:\n"
+            f"1. Effectively solves the 'Overall Goal & Context'.\n"
+            f"2. Synthesizes the best features, logic, or approaches from *both* parents, while AVOIDING flaws identified in either parent by the AI Judge.\n"
+            f"3. Aims to satisfy the 'Primary Evaluation Guidelines' better than both parents.\n"
+            f"4. Adheres to any specified solution structure (e.g., target_solution_description) and suggested imports.\n\n"
             f"Your Response Format:\n"
-            f"Provide *only* the complete Python code for the new child function. "
-            f"The code should be self-contained or rely only on the allowed imports. "
-            f"Do not include any surrounding text, explanations, comments outside the function, or markdown code fences (like ```python or ```)."
+            f"Provide *only* the complete Python code for the new child solution. "
+            f"No surrounding text, explanations, comments outside the code, or markdown code fences."
         )
-        logger.debug(f"Designed crossover prompt:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
+
+        prompt = "".join(prompt_parts)
+        logger.debug(f"Designed blueprint-aligned crossover prompt:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
     # --- MODIFIED: _format_evaluation_feedback (v6 for Ruff and cleaner structure) ---
@@ -242,185 +287,218 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
 
         return "Summary of the previous version's evaluation:\n" + "\n".join(feedback_parts)
 
-    # --- MODIFIED: design_mutation_prompt (v3 for Ruff feedback) ---
     def design_mutation_prompt(self, task: TaskDefinition, parent_program: Program,
-                               evaluation_feedback: Optional[Dict[str, Any]] = None,
-                               # This 'evaluation_feedback' might be less critical now
-                               ancestral_summary: Optional[List[Dict[str, Any]]] = None) -> str:  # Method_v3
+                               ancestral_summary: Optional[List[Dict[str, Any]]] = None
+                               ) -> str:  # Method_v_blueprint_1.0.1 (Signature updated)
         logger.info(
-            f"Designing mutation prompt for program: {parent_program.id} (Gen: {parent_program.generation}, Mode: {task.improvement_mode})")
-
-        # Primary feedback for LLM now comes from parent_program.errors (for Ruff) and I/O test results.
-        # The 'evaluation_feedback' dict passed in might be redundant if all info is on Program object.
-        # For now, let's assume parent_program has updated .errors and .fitness_scores.
-
-        # 1. Feedback from I/O Tests (Correctness & Runtime)
-        io_feedback_parts = []
-        correctness = parent_program.fitness_scores.get("correctness")
-        if correctness is not None:
-            io_feedback_parts.append(f"- Correctness (from I/O tests): {correctness * 100:.2f}%")
-            passed = parent_program.fitness_scores.get("passed_tests", 0)
-            total = parent_program.fitness_scores.get("total_tests", 0)
-            if total > 0:
-                io_feedback_parts.append(f"  - Passed {int(passed)} out of {int(total)} I/O test cases.")
-
-        runtime = parent_program.fitness_scores.get("runtime_ms")
-        if runtime is not None and runtime != float('inf'):
-            io_feedback_parts.append(f"- Runtime (from I/O tests): {runtime:.2f} ms")
-
-        # Add execution errors if they are not Ruff errors
-        execution_errors = [err for err in parent_program.errors if not err.strip().lower().startswith("ruff-")]
-        if execution_errors:
-            io_feedback_parts.append(
-                f"- Other Issues Encountered During Execution:\n" + "\n".join([f"  - {e}" for e in execution_errors]))
-
-        io_feedback_summary = "I/O Test and Execution Feedback:\n" + ("\n".join(
-            io_feedback_parts) if io_feedback_parts else "  No specific I/O test issues reported, or no tests run.")
-
-        # 2. Static Analysis Feedback (from Ruff, using the new helper)
-        static_analysis_summary = self._format_static_analysis_feedback_for_llm(parent_program.errors)
-
-        # 3. Ancestral History
-        historical_context_section = self._format_ancestral_summary_for_prompt(ancestral_summary)
-
-        diff_instructions = (
-            "Your Response Format:\n"
-            "Propose improvements to the 'Current Code' below by providing your changes as a sequence of diff blocks. "  # ... (as before)
-            "Each diff block must follow this exact format:\n"
-            "<<<<<<< SEARCH\n"
-            "# Exact original code lines to be found and replaced\n"
-            "=======\n"
-            "# New code lines to replace the original\n"
-            ">>>>>>> REPLACE\n\n"
-            "- The SEARCH block must be an *exact* segment from the 'Current Code'.\n"
-            "- If adding new code, SEARCH can be an adjacent line or a comment indicating location.\n"
-            "- If deleting code, REPLACE should be empty.\n"
-            "- Provide all changes as diff blocks. No other text or explanations."
+            f"Designing blueprint-aligned mutation prompt for program: {parent_program.id} (Gen: {parent_program.generation})"
         )
-        prompt_header = f"You are an expert Python programmer. Your task is to improve an existing Python function based on its previous performance, historical attempts, and the overall goal.\n\n"
-        current_code_section = f"Current Code (Version from Generation {parent_program.generation}):\n```python\n{parent_program.code}\n```\n\n"
-        allowed_imports_section = f"Allowed Standard Library Imports: {task.allowed_imports}. Do not use other external libraries or packages.\n\n"
 
         prompt_parts = [
-            prompt_header,
-            f"Overall Task Context: {task.description}\nFunction of Interest: `{task.function_name_to_evolve}`\n",
-            allowed_imports_section,
-            current_code_section,
-            io_feedback_summary,  # IO feedback first
-            "\n" + static_analysis_summary,  # Then Ruff feedback
-            "\n" + historical_context_section,  # Then history
+            f"You are an expert Python programmer. Your task is to REFINE and IMPROVE an existing Python solution based on previous evaluations and the overall task goals.\n\n"
+            f"## Overall Goal & Context:\n{task.description}\n\n"
         ]
+        if task.target_solution_description:
+            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution_description}\n\n")
 
-        if task.improvement_mode == "general_refinement":
-            improvement_goal_intro = "Your Improvement Goal (General Refinement):\n"
-            directives_section = f"Specific Directives: {task.specific_improvement_directives}\n" if task.specific_improvement_directives else ""
-            metrics_str = ", ".join(
-                task.primary_focus_metrics) if task.primary_focus_metrics else "general code quality"
-            metrics_section = f"Primary Focus Metrics: Aim to improve {metrics_str}.\n"
-            improvement_goal_details = (
-                f"Based on all feedback, your goal is to refine this code. "
-                f"{directives_section}"
-                f"{metrics_section}"
-                f"Ensure changes do not break existing I/O functionality.\n\n"
-            )
-            prompt_parts.extend([improvement_goal_intro, improvement_goal_details])
-        else:  # "task_focused"
-            improvement_goal_intro = "Your Improvement Goal (Task Focused):\n"
-            improvement_goal_details = (
-                f"Based on all feedback, your goal is to improve function `{task.function_name_to_evolve}` "
-                f"to better solve: {task.description}\n"
-                f"Prioritize fixing any I/O correctness or execution errors, then static analysis issues. "
-                f"If correct and clean, focus on efficiency or robustness. "
-                f"Original criteria: {task.evaluation_criteria}\n\n"
-            )
-            prompt_parts.extend([improvement_goal_intro, improvement_goal_details])
+        prompt_parts.append(
+            f"## Current Code (Version from Generation {parent_program.generation}):\n```python\n{parent_program.code}\n```\n\n")
 
-        prompt_parts.append(diff_instructions)
+        prompt_parts.append(f"## Feedback on Current Code:\n")
+
+        if parent_program.llm_judge_feedback:
+            prompt_parts.append(
+                f"### AI Judge's Assessment (Overall Score: {parent_program.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n"
+                f"{parent_program.llm_judge_feedback}\n\n"
+            )
+        elif task.evaluation_guidelines_for_llm_judge:
+            prompt_parts.append(
+                f"### Reminder of Evaluation Guidelines (Aim for these):\n"
+                f"{task.evaluation_guidelines_for_llm_judge}\n\n"
+            )
+
+        exec_status = "Ran successfully" if parent_program.fitness_scores.get(
+            "runs_without_error") else "Failed or crashed during basic execution"
+        prompt_parts.append(f"- Basic Execution Status: {exec_status}\n")
+        if parent_program.fitness_scores.get("correctness") is not None:
+            prompt_parts.append(
+                f"- I/O Test Correctness: {parent_program.fitness_scores.get('correctness', 0.0) * 100:.1f}%\n")
+
+        static_analysis_summary = self._format_static_analysis_feedback_for_llm(parent_program.errors)
+        prompt_parts.append(f"{static_analysis_summary}\n")
+
+        critical_errors = [e for e in parent_program.errors if not e.startswith(
+            "Ruff-") and "Execution Log (STDOUT" not in e and "Execution Log (STDERR" not in e]
+        if critical_errors:
+            prompt_parts.append(f"### Other Critical Issues from Last Attempt:\n" + "\n".join(
+                [f"  - {ce}" for ce in critical_errors]) + "\n\n")
+
+        historical_context_section = self._format_ancestral_summary_for_prompt(ancestral_summary)
+        if historical_context_section:
+            prompt_parts.append(historical_context_section)
+
+        prompt_parts.append(
+            f"## Your Improvement Goal:\n"
+            f"Based on all the feedback above (especially the AI Judge's assessment if available), your goal is to significantly improve the 'Current Code'.\n"
+            f"Address the weaknesses pointed out by the AI Judge and fix any reported errors or static analysis issues.\n"
+            f"Strive to better meet the 'User's Evaluation Guidelines' (mentioned in the AI Judge's feedback or the task context).\n"
+        )
+        if task.specific_improvement_directives:
+            prompt_parts.append(f"Also consider these specific directives: {task.specific_improvement_directives}\n")
+        if task.primary_focus_metrics:
+            prompt_parts.append(
+                f"Consider improving these metrics if possible: {', '.join(task.primary_focus_metrics)}.\n")
+
+        prompt_parts.append(
+            f"\nYour Response Format:\n"  # Diff instructions as before
+            f"Propose improvements by providing changes as a sequence of diff blocks. "
+            f"Each diff block must follow this exact format:\n"
+            f"<<<<<<< SEARCH\n"
+            f"# Exact original code lines to be found and replaced\n"
+            f"=======\n"
+            f"# New code lines to replace the original\n"
+            f">>>>>>> REPLACE\n\n"
+            f"- The SEARCH block must be an *exact* segment from the 'Current Code'.\n"
+            f"- Provide all changes as diff blocks. No other text or explanations.\n"
+        )
+
         prompt = "".join(prompt_parts)
-
         logger.debug(
-            f"Designed mutation prompt (mode: {task.improvement_mode}, requesting diff):\n--PROMPT START--\n{prompt}\n--PROMPT END--")
+            f"Designed blueprint-aligned mutation prompt (requesting diff):\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
-    # --- MODIFIED: design_bug_fix_prompt (v3 for Ruff feedback) ---
-    def design_bug_fix_prompt(self, task: TaskDefinition, program: Program, error_message: str,
-                              # error_message is the primary execution error
-                              execution_output: Optional[str] = None,
-                              ancestral_summary: Optional[List[Dict[str, Any]]] = None) -> str:  # Method_v3
+    # In PromptDesignerAgent
+    def design_bug_fix_prompt(self, task: TaskDefinition, program: Program,  # Removed error_message, execution_output
+                              ancestral_summary: Optional[List[Dict[str, Any]]] = None
+                              ) -> str:  # Method_v_blueprint_1.0.1 (Signature updated, typo fixed)
         logger.info(
-            f"Designing bug-fix prompt for program: {program.id} (Gen: {program.generation}, Mode: {task.improvement_mode})")
+            f"Designing blueprint-aligned bug-fix prompt for program: {program.id} (Gen: {program.generation})"
+        )
 
-        # Static analysis feedback (Ruff issues from program.errors)
-        # Filter out the main `error_message` if it's already in program.errors to avoid duplication
-        other_static_errors = [e for e in program.errors if
-                               e != error_message and e.strip().lower().startswith("ruff-")]
-        static_analysis_summary = self._format_static_analysis_feedback_for_llm(other_static_errors)
-        if not other_static_errors:  # If the only errors were execution errors, explicitly say no Ruff issues
-            static_analysis_summary = "Static Analysis Feedback (from Ruff):\n  No specific Ruff issues reported beyond the main execution error."
+        prompt_parts = [
+            f"You are an expert Python programmer. Your task is to FIX CRITICAL ISSUES in an existing Python solution based on previous evaluations and the overall task goals.\n\n"
+            f"## Overall Goal & Context:\n{task.description}\n\n"
+        ]
+        if task.target_solution_description:
+            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution_description}\n\n")
+
+        prompt_parts.append(
+            f"## Buggy Code (Version from Generation {program.generation}):\n```python\n{program.code}\n```\n\n")
+
+        prompt_parts.append(f"## Feedback on Buggy Code:\n")
+
+        primary_failure_reason = f"The code failed with status: {program.status}."
+        critical_errors_from_program = [e for e in program.errors if not e.startswith(
+            "Ruff-") and "Execution Log (STDOUT" not in e and "Execution Log (STDERR" not in e]
+
+        if "failed_evaluation_execution" in program.status and critical_errors_from_program:
+            primary_failure_reason += f"\n  - Key Error: {critical_errors_from_program[0]}"
+        elif "failed_evaluation_syntax" in program.status and critical_errors_from_program:
+            primary_failure_reason += f"\n  - Syntax Error: {critical_errors_from_program[0]}"
+        elif program.llm_judge_feedback and (program.fitness_scores.get('llm_judge_overall_score', 10) <= 3):
+            primary_failure_reason = (
+                f"The AI Judge gave a very low score ({program.fitness_scores.get('llm_judge_overall_score')}/10) "
+                f"indicating critical flaws. Judge's Justification:\n{program.llm_judge_feedback}")
+
+        prompt_parts.append(f"### Primary Problem:\n{primary_failure_reason}\n\n")
+
+        # *** FIXED TYPO HERE: program.fitness_scores instead of parent_program.fitness_scores ***
+        if program.llm_judge_feedback and not (program.fitness_scores.get('llm_judge_overall_score', 10) <= 3):
+            prompt_parts.append(
+                f"### AI Judge's Assessment (Overall Score: {program.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n"  # Was parent_program
+                f"{program.llm_judge_feedback}\n\n"
+            )
+
+        static_analysis_summary = self._format_static_analysis_feedback_for_llm(program.errors)
+        prompt_parts.append(f"{static_analysis_summary}\n")
+
+        if critical_errors_from_program and (not ("failed_evaluation_execution" in program.status) and not (
+                "failed_evaluation_syntax" in program.status)):
+            prompt_parts.append(f"### Other Critical Issues from Last Attempt:\n" + "\n".join(
+                [f"  - {ce}" for ce in critical_errors_from_program]) + "\n\n")
 
         historical_context_section = self._format_ancestral_summary_for_prompt(ancestral_summary)
-        output_segment = f"Execution Output (stdout/stderr that might be relevant):\n{execution_output}\n" if execution_output else "No detailed execution output was captured beyond the error message itself.\n"
-        diff_instructions = (
-            "Your Response Format:\n"  # ... (as before) ...
-            "Propose fixes to the 'Buggy Code' below by providing your changes as a sequence of diff blocks. "
-            "Each diff block must follow this exact format:\n"
-            "<<<<<<< SEARCH\n"
-            "# Exact original code lines to be found and replaced\n"
-            "=======\n"
-            "# New code lines to replace the original\n"
-            ">>>>>>> REPLACE\n\n"
-            "- The SEARCH block must be an *exact* segment from the 'Buggy Code'.\n"
-            "- Provide all suggested changes as one or more such diff blocks. No other text or explanations."
+        if historical_context_section:
+            prompt_parts.append(historical_context_section)
+
+        prompt_parts.append(
+            f"## Your Bug-Fix Goal:\n"
+            f"Analyze the 'Buggy Code' and all the feedback. Your primary goal is to FIX the identified 'Primary Problem'.\n"
+            f"Also address any other reported errors or static analysis issues.\n"
+            f"The corrected solution must work as intended by the 'Overall Goal & Context'.\n"
         )
 
-        prompt = (
-            f"You are an expert Python programmer. Your task is to fix a bug in an existing Python function, considering previous attempts and static analysis feedback.\n\n"
-            f"Overall Task Description: {task.description}\n"
-            f"Function to Fix: `{task.function_name_to_evolve}`\n"
-            f"Allowed Standard Library Imports: {task.allowed_imports}. Do not use other external libraries or packages.\n\n"
-            f"Buggy Code (Version from Generation {program.generation}):\n```python\n{program.code}\n```\n\n"
-            f"Primary Error Encountered During Execution: {error_message}\n"
-            f"{output_segment}\n"
-            f"{static_analysis_summary}\n\n"  # Add Ruff feedback here
-            f"{historical_context_section}"
-            f"Your Goal:\n"
-            f"Analyze the 'Buggy Code', the 'Primary Error', 'Execution Output', any 'Static Analysis Feedback', and 'Brief History...' to identify and fix the bug(s). "
-            f"The corrected function must adhere to the overall task description and allowed imports.\n\n"
-            f"{diff_instructions}"
+        prompt_parts.append(
+            f"\nYour Response Format:\n"  # Diff instructions as before
+            f"Propose fixes by providing changes as a sequence of diff blocks. "
+            f"Each diff block must follow this exact format:\n"
+            f"<<<<<<< SEARCH\n"
+            f"# Exact original code lines to be found and replaced\n"
+            f"=======\n"
+            f"# New code lines to replace the original\n"
+            f">>>>>>> REPLACE\n\n"
+            f"- The SEARCH block must be an *exact* segment from the 'Buggy Code'.\n"
+            f"- Provide all suggested changes as one or more such diff blocks. No other text or explanations.\n"
         )
-        logger.debug(f"Designed bug-fix prompt (requesting diff):\n--PROMPT START--\n{prompt}\n--PROMPT END--")
+
+        prompt = "".join(prompt_parts)
+        logger.debug(
+            f"Designed blueprint-aligned bug-fix prompt (requesting diff):\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
-    # --- MODIFIED: design_failed_diff_fallback_prompt (v3 for Ruff context) ---
     def design_failed_diff_fallback_prompt(self, task: TaskDefinition, original_program: Program,
-                                           previous_attempt_summary: str,
-                                           # This summary should ideally include why diff failed + original goal
+                                           previous_attempt_summary: str,  # Goal of the failed diff
                                            ancestral_summary: Optional[
-                                               List[Dict[str, Any]]] = None) -> str:  # Method_v3
+                                               List[Dict[str, Any]]] = None) -> str:  # Method_v_blueprint_1.0.0
         logger.info(
-            f"Designing failed-diff fallback prompt for program: {original_program.id} (Gen: {original_program.generation})")
-
-        # Include Ruff feedback for the original_program if it's relevant to the fallback
-        static_analysis_summary = self._format_static_analysis_feedback_for_llm(original_program.errors)
-        historical_context_section = self._format_ancestral_summary_for_prompt(ancestral_summary)
-
-        prompt = (
-            f"You are an expert Python programmer. Your previous attempt to provide improvements for the following code via a diff format was unsuccessful or resulted in no changes.\n\n"
-            f"Overall Task Description: {task.description}\n"
-            f"Function of Interest: `{task.function_name_to_evolve}`\n"
-            f"Allowed Standard Library Imports: {task.allowed_imports}. Do not use other external libraries or packages.\n\n"
-            f"Original Code (that was attempted to be diffed):\n```python\n{original_program.code}\n```\n\n"
-            f"{static_analysis_summary}\n\n"  # Add Ruff feedback on the original code
-            f"Summary of Previous Attempt's Goal: {previous_attempt_summary}\n\n"
-            f"{historical_context_section}"
-            f"Your New Goal:\n"
-            f"Please provide the *complete, fully corrected/improved version* of the function `{task.function_name_to_evolve}`. "
-            f"Ensure your new version addresses the objectives from the 'Previous Attempt's Goal', any 'Static Analysis Feedback', and learns from 'Brief History...'.\n\n"
-            f"Your Response Format:\n"
-            f"Provide *only* the complete Python code for the new version of the function. "
-            f"No surrounding text, explanations, or markdown code fences."
+            f"Designing blueprint-aligned failed-diff fallback prompt for program: {original_program.id} (Gen: {original_program.generation})"
         )
-        logger.debug(f"Designed failed-diff fallback prompt:\n{prompt}")
+
+        prompt_parts = [
+            f"You are an expert Python programmer. Your previous attempt to provide improvements for the following code via a diff format was unsuccessful or resulted in no changes. You will now provide the complete, improved code.\n\n"
+            f"## Overall Goal & Context:\n{task.description}\n"
+        ]
+        if task.target_solution_description:
+            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution_description}\n")
+
+        prompt_parts.append(
+            f"\n## Original Code (that was attempted to be diffed):\n```python\n{original_program.code}\n```\n\n")
+
+        # Feedback on Original Code
+        prompt_parts.append(f"## Feedback on Original Code (that the failed diff was targeting):\n")
+        if original_program.llm_judge_feedback:
+            prompt_parts.append(
+                f"### AI Judge's Assessment (Score: {original_program.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n{original_program.llm_judge_feedback}\n\n"
+            )
+
+        static_analysis_summary = self._format_static_analysis_feedback_for_llm(original_program.errors)
+        prompt_parts.append(f"{static_analysis_summary}\n")  # Ruff issues
+
+        critical_errors = [e for e in original_program.errors if not e.startswith(
+            "Ruff-") and "Execution Log (STDOUT" not in e and "Execution Log (STDERR" not in e]
+        if critical_errors:
+            prompt_parts.append(f"### Other Critical Issues in Original Code:\n" + "\n".join(
+                [f"  - {ce}" for ce in critical_errors]) + "\n\n")
+
+        prompt_parts.append(f"## Summary of Previous (Failed Diff) Attempt's Goal:\n{previous_attempt_summary}\n\n")
+
+        historical_context_section = self._format_ancestral_summary_for_prompt(ancestral_summary)
+        if historical_context_section:
+            prompt_parts.append(historical_context_section)
+
+        prompt_parts.append(
+            f"## Your New Goal (Provide Full Code):\n"
+            f"Please provide the *complete, fully corrected/improved version* of the solution. "
+            f"Your new version must address the objectives from the 'Previous Attempt's Goal' (e.g., critiques from the AI Judge, specific errors, or refinement targets) and incorporate feedback on the 'Original Code'.\n"
+            f"Aim to satisfy the task's 'Evaluation Guidelines' (if provided to the judge previously) or general quality standards.\n\n"
+            f"Your Response Format:\n"
+            f"Provide *only* the complete Python code for the new version. "
+            f"No surrounding text, explanations, comments outside the code, or markdown code fences."
+        )
+
+        prompt = "".join(prompt_parts)
+        logger.debug(
+            f"Designed blueprint-aligned failed-diff fallback prompt:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
     # --- MODIFIED: design_llm_judge_prompt (Corrected f-string formatting) ---
