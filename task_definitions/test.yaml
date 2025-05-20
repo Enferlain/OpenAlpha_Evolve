@@ -1,0 +1,109 @@
+# --- Task Definition YAML Schema (Blueprint Aligned) ---
+
+# REQUIRED Fields:
+# -----------------
+id: "unique_task_identifier_string" # e.g., "creative_story_writer_v1", "mandelbrot_visualizer_script"
+description: | # Multi-line string (using | or >) for a rich, high-level problem/goal statement.
+  This is where you describe the overall quest for the AI. 
+  Be detailed and clear about what you want the AI to achieve or create.
+  For example: "Develop a Python script that generates a short, unique, and coherent fantasy story snippet (200-300 words) based on a given theme. The story should have a clear beginning, middle, and a hint of an end. It should be engaging and imaginative."
+  Or: "Create an interactive Python application using a simple GUI library (like Tkinter or Pygame if suggested) to visualize the Mandelbrot set. Users should be able to zoom and pan."
+
+# NEW CORE & HIGHLY RECOMMENDED Fields for LLM-Driven Tasks:
+# ----------------------------------------------------------
+target_solution: | # What should the final output BE? (Replaces/generalizes 'evolve_function')
+  Example: "A single Python script that, when run, prints the story to the console."
+  Example: "A Python module containing a class named 'FractalExplorer' with methods for 'draw_mandelbrot' and 'handle_input'."
+  Example: "A Python function named 'generate_art_pattern' that takes a seed (int) and returns a list of drawing commands."
+
+ai_review_criteria: | # Natural language criteria for the LLM Review.
+  Example for story writer:
+  "1. Coherence (1-10): Does the story make sense and flow logically?
+   2. Creativity/Originality (1-10): Is the story imaginative and not generic?
+   3. Engagement (1-10): Is the story interesting to read?
+   4. Theme Adherence (1-10): Does it clearly relate to the provided theme (if any)?
+   5. Completeness (1-10): Does it feel like a somewhat complete snippet with a sense of progression?
+   Overall Score (1-10): Your overall assessment of the story's quality."
+  Example for Mandelbrot:
+  "1. Visual Correctness (1-10): Does the image look like the Mandelbrot set?
+   2. Interactivity (1-10): Can the user zoom and pan effectively? Is it responsive?
+   3. Code Quality & Structure (1-10): Is the code reasonably well-organized and readable?
+   4. Aesthetics (1-10): Is the visualization visually appealing (e.g., color choices, smoothness)?
+   Overall Score (1-10): Your overall assessment."
+
+# OPTIONAL Fields for Seeding, Context, and Hints:
+# ------------------------------------------------
+initial_seed: | # Optional: A starting point. Can be code, pseudocode, or just concepts.
+  Example (code):
+  ```python
+  # A very basic fractal drawing attempt
+  def draw_pixel(x, y, color):
+      print(f"Drawing pixel at ({x},{y}) with color {color}")
+  # TODO: Implement Mandelbrot logic
+  ```
+  Example (ideas):
+  "Key themes for the story: betrayal, ancient magic, lost artifact.
+   Possible characters: a rogue mage, a determined knight.
+   Setting: a crumbling, forgotten city."
+
+run_context: | # Optional: For tasks needing external data or a (mocked) interaction context.
+  Example:
+  "Input themes for story generation will be provided as simple text strings.
+   The script should not require any external files to run."
+  Example:
+  "The Mandelbrot visualizer will run in a standard Python environment.
+   No external data files are needed. Assume common GUI libraries might be used if suggested."
+
+suggested_imports: # Optional: List of Python libraries as HINTS for the LLM, not hard constraints.
+  - "random"
+  - "math"
+  # Example for Mandelbrot:
+  # - "tkinter"
+  # - "numpy" # For potentially faster calculations
+
+# OPTIONAL Fields (Now more like hints or for specific legacy tasks):
+# -------------------------------------------------------------------
+evolve_function: "my_specific_function" # Optional: Still useful if target_solution is very function-specific.
+                                                # Less critical if target_solution is broader (e.g., "a script").
+
+io_examples: # Optional: Can be part of sample_data_paths or implicitly handled by LLM review based on description.
+                       # Still useful for tasks where precise I/O is testable and important alongside LLM review.
+  - input: {"theme": "courage"}
+    output: {"type": "story_snippet", "length_criteria_met": true} # Output format for ai review, or actual story for programmatic check
+  - input: {"seed_value": 123}
+    # For a function, the output might be its direct return value.
+    output: ["MOVE 10,10", "LINE_TO 20,20", "COLOR RED"]
+
+allowed_imports: # Optional: Becomes less strict, more like strong suggestions if 'suggested_imports' is also used.
+                 # Use for critical, known-safe imports if truly needed.
+  - "heapq"
+  - "collections"
+
+# OPTIONAL Fields for Guiding the Evolutionary Process:
+# ----------------------------------------------------
+improvement_mode: "task_focused" # Or "general_refinement". Default is "task_focused".
+                                 # "task_focused": Focus on task.description and target_solution.
+                                 # "general_refinement": Focus on improving initial_seed based on directives.
+
+primary_focus_metrics: # Optional: Metrics the LLM/SelectionController should primarily focus on improving.
+                       # These are keys from the program.fitness_scores dictionary.
+  - "ai_review_score"             # Ai review
+  - "runs_without_error"          # Also very important.
+  - "ruff_violations"             # For code quality.
+  - "maintainability_index"       # Radon MI
+  # - "correctness"               # If still using I/O examples.
+  # - "cyclomatic_complexity_avg" # Radon CC
+  # - "runtime_ms"                # Time taken
+
+refine_goals: | # Optional: Natural language instructions for 'general_refinement' or specific mutation goals.
+  "Focus on making the story more emotionally impactful."
+  "Try to optimize the rendering speed of the fractal."
+  "Refactor the main class to be more modular."
+
+# --- DEPRECATED (or less emphasized for new blueprint tasks) ---
+# evaluation_criteria: # This is now largely superseded by 'ai_review_criteria'
+#   target_metric: "correctness" # Still usable if you have a very specific non-LLM metric goal
+#   goal: "maximize"
+
+# initial_prompt_override: # The PromptStudio now constructs a much richer initial prompt based on the above fields.
+                     # This might only be used in very specific override scenarios.
