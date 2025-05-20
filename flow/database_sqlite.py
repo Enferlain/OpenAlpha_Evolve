@@ -1,4 +1,4 @@
-# database_agent/sqlite_database_agent.py
+# database_agent/database_sqlite.py
 # Version: 1.1.0 (Adding LLM Judge Feedback persistence)
 
 import sqlite3

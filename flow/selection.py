@@ -1,4 +1,4 @@
-# selection_controller/selection_controller_agent.py
+# selection_controller/selection.py
 # Version: 1.1.1 (Corrected potential editor misinterpretation of list.append)
 
 import random

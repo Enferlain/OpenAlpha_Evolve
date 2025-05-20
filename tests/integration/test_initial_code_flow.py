@@ -2,9 +2,9 @@
 import pytest
 from unittest.mock import AsyncMock  # For mocking async methods!
 
-from core.interfaces import TaskDefinition, Program
-from prompt_designer.prompt_designer_agent import PromptDesignerAgent
-from code_generator.code_generator_agent import CodeGeneratorAgent
+from core.interfaces import TaskDefinition
+from engine.prompting import PromptDesignerAgent
+from engine.generation import CodeGeneratorAgent
 from config import settings  # To potentially mock settings values
 
 

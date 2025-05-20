@@ -1,10 +1,9 @@
 # tests/integration/test_initial_code_flow_with_api.py
 import pytest
-import asyncio  # For the actual async call
 
 from core.interfaces import TaskDefinition
-from prompt_designer.prompt_designer_agent import PromptDesignerAgent
-from code_generator.code_generator_agent import CodeGeneratorAgent
+from engine.prompting import PromptDesignerAgent
+from engine.generation import CodeGeneratorAgent
 from config import settings
 
 

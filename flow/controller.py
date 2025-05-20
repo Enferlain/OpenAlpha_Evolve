@@ -1,4 +1,4 @@
-# task_manager/task_manager_agent.py
+# task_manager/controller.py
 # Version: 1.1.0 (Adding LLM Judge Score calculation for monitoring)
 
 import logging
@@ -8,19 +8,18 @@ import time
 from typing import List, Dict, Any, Optional, Union
 
 from core.interfaces import (
-    TaskManagerInterface, TaskDefinition, Program, BaseAgent,
-    PromptDesignerInterface, CodeGeneratorInterface, EvaluatorAgentInterface,
+    TaskManagerInterface, TaskDefinition, Program, PromptDesignerInterface, CodeGeneratorInterface, EvaluatorAgentInterface,
     DatabaseAgentInterface, SelectionControllerInterface,
     MonitoringAgentInterface
 )
 from config import settings
-from prompt_designer.prompt_designer_agent import PromptDesignerAgent
-from code_generator.code_generator_agent import CodeGeneratorAgent
+from engine.prompting import PromptDesignerAgent
+from engine.generation import CodeGeneratorAgent
 # Ensure EvaluatorAgent is imported if its type hint is used, or adjust if only interface used.
-from evaluator_agent.evaluator_agent import EvaluatorAgent
-from database_agent.sqlite_database_agent import SQLiteDatabaseAgent
-from selection_controller.selection_controller_agent import SelectionControllerAgent
-from monitoring_agent.monitoring_agent import MonitoringAgent
+from engine.evaluation import EvaluatorAgent
+from flow.database_sqlite import SQLiteDatabaseAgent
+from flow.selection import SelectionControllerAgent
+from flow.monitoring import MonitoringAgent
 
 logger = logging.getLogger(__name__)
 

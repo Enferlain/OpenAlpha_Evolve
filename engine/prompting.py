@@ -1,4 +1,4 @@
-# prompt_designer/prompt_designer_agent.py
+# prompt_designer/prompting.py
 # Version: 1.1.0 (Added LLM Judge Prompt Design)
 
 from typing import Optional, Dict, Any, List

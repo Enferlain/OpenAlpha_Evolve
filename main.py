@@ -6,7 +6,7 @@ import argparse  # For command-line arguments
 import os  # For path operations
 import yaml  # For loading YAML files (pip install PyYAML)
 
-from task_manager.task_manager_agent import TaskManagerAgent
+from flow.controller import TaskManagerAgent
 from core.interfaces import TaskDefinition  # Assuming Program is also imported if needed by TaskDefinition
 from config import settings
 
