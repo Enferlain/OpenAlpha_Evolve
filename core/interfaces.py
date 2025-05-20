@@ -19,12 +19,12 @@ class Program:
     task_id: Optional[str] = None
     creation_method: str = "unknown"
 
-    # --- NEW Field for LLM Judge Textual Feedback (Blueprint Requirement) ---
-    ai_feedback: Optional[str] = field(default=None)
-    """Qualitative textual feedback from the LLM-as-a-judge."""
+    # --- NEW Field for LLM Review Textual Feedback (Blueprint Requirement) ---
+    ai_review_feedback: Optional[str] = field(default=None)
+    """Qualitative textual feedback from the LLM-as-a-reviewer."""
 
     # Note for SolutionEvaluator:
-    # - `fitness_scores` will store 'llm_judge_overall_score', 'llm_judge_creativity_score' (and others from LLM judge)
+    # - `fitness_scores` will store 'ai_review_score', 'llm_review_creativity_score' (and others from LLM review)
     # - `fitness_scores` will also store 'runs_without_error' (bool, or 1.0/0.0 if strictly float needed for sorting keys)
     # - `fitness_scores` continues to store 'ruff_violations', 'runtime_ms', 'correctness' (if applicable), etc.
 
@@ -38,7 +38,7 @@ class TaskDefinition:
     initial_seed: Optional[str] = None # RENAMED from initial_seed_code, broader scope
     """A starting point, could be code, pseudocode, or even a list of concepts/ideas."""
 
-    ai_criteria: Optional[str] = None # NEW
+    ai_review_criteria: Optional[str] = None # NEW
     """Natural language criteria for an LLM to assess the solution's quality, effectiveness, creativity, etc."""
 
     run_context: Optional[str] = None # NEW
@@ -52,7 +52,7 @@ class TaskDefinition:
 
     # --- Fields that become more "optional" or "hints" rather than strict constraints ---
     evolve_function: Optional[str] = None # Now more of a hint if target_solution is primary
-    io_examples: Optional[List[Dict[str, Any]]] = None # Can be part of sample_data_paths or LLM judge's role
+    io_examples: Optional[List[Dict[str, Any]]] = None # Can be part of sample_data_paths or LLM reviewer's role
     allowed_imports: Optional[List[str]] = None # Becomes less strict, more like strong suggestions if suggested_imports is also used
 
     # --- Existing fields for general refinement / specific focus ---
@@ -62,13 +62,13 @@ class TaskDefinition:
     """
     'task_focused': The agent focuses on the problem description and target_solution.
     'general_refinement': The agent focuses on improving 'initial_seed' based on general metrics
-                          and 'refine_goals', potentially using I/O examples/LLM judge for regression/quality.
+                          and 'refine_goals', potentially using I/O examples/LLM review for regression/quality.
     """
 
     primary_focus_metrics: Optional[List[str]] = None
     """
     For 'general_refinement' or even 'task_focused' mode, list of metrics the LLM should primarily focus on improving
-    (e.g., ["llm_judge_overall_score", "ruff_violations", "cyclomatic_complexity", "runtime_ms"]).
+    (e.g., ["ai_review_score", "ruff_violations", "cyclomatic_complexity", "runtime_ms"]).
     This will be used by the SolutionEvaluator and PromptStudio.
     """
 
@@ -77,8 +77,8 @@ class TaskDefinition:
     Natural language instructions, e.g., 'Focus on reducing runtime of the main loop.' or 'Refactor for better readability.'
     """
 
-    evaluation_criteria: Optional[Dict[str, Any]] = None # General criteria, may inform LLM judge guidelines
-    """e.g., {'target_metric': 'runtime_ms', 'goal': 'minimize'} - less primary if LLM judge is used."""
+    evaluation_criteria: Optional[Dict[str, Any]] = None # General criteria, may inform ai review guidelines
+    """e.g., {'target_metric': 'runtime_ms', 'goal': 'minimize'} - less primary if LLM review is used."""
 
 
 class BaseAgent(ABC):
@@ -133,13 +133,13 @@ class PromptDesignerInterface(BaseAgent):
         """Designs a prompt to ask for full code after a diff attempt failed."""
         pass
 
-    @abstractmethod # NEW Method for LLM Judge Prompt
-    def judge_prompt(self,
+    @abstractmethod # NEW Method for ai review Prompt
+    def ai_review_prompt(self,
                                 task: TaskDefinition,
-                                program_to_judge: Program,
+                                program_to_review: Program,
                                 execution_summary: Dict[str, Any] # Contains info like runs_ok, stdout, stderr, ruff_summary
                                ) -> str:
-        """Designs a prompt to ask an LLM to act as a judge for the given program."""
+        """Designs a prompt to ask an LLM to act as a reviewer for the given program."""
         pass
 
 class CodeGeneratorInterface(BaseAgent):
@@ -155,7 +155,7 @@ class SolutionEvaluatorInterface(BaseAgent):
         pass
 
 
-class DatabaseAgentInterface(BaseAgent):
+class DatabaseInterface(BaseAgent):
     @abstractmethod
     async def save_program(self, program: Program):
         pass

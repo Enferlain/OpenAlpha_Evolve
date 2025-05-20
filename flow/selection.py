@@ -17,30 +17,29 @@ class EvoSelector(SelectionControllerInterface, BaseAgent):
         self.elitism_count = settings.ELITISM_COUNT
         logger.info(f"EvoSelector initialized with elitism_count: {self.elitism_count}")
 
-    # --- MODIFIED: _get_program_sort_key (Blueprint Step 5) ---
-    def _get_program_sort_key(self, program: Program, task: TaskDefinition) -> Tuple:  # Method_v4.0.1
+    def _get_program_sort_key(self, program: Program, task: TaskDefinition) -> Tuple: # Method_v4.0.2
         """
         Creates a sort key for a program. Higher tuple values mean "better" for sorting (reverse=True).
         Priority:
         1. runs_without_error (True is infinitely better)
-        2. llm_judge_overall_score (higher is better)
+        2. ai_review_score (higher is better)  <--- UPDATED NAME
         3. correctness (I/O tests, higher is better)
         4. -ruff_violations (lower is better)
         5. Primary Focus Metrics from TaskDefinition
         6. Default Tie-breakers: -runtime_ms (lower is better), generation (higher is better)
         """
-        key_parts: List[Union[float, int]] = []  # Explicitly type hint as list of numbers
+        key_parts: List[Union[float, int]] = []
 
         # 1. Did it run without error?
         runs_ok_score = 1.0 if program.fitness_scores.get("runs_without_error", False) else 0.0
         key_parts.append(runs_ok_score)
 
-        # 2. LLM Judge Overall Score
-        llm_judge_score = program.fitness_scores.get(
-            "llm_judge_overall_score",
-            settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0)
+        # 2. AI Review Score (higher is better)  <--- UPDATED SECTION
+        ai_review_score_value = program.fitness_scores.get(
+            "ai_review_score", # Use the new key
+            settings.DEFAULT_METRIC_VALUE.get("ai_review_score", 0.0) # Use the new key
         )
-        key_parts.append(llm_judge_score)
+        key_parts.append(ai_review_score_value) # Use the new local variable name
 
         # 3. Correctness
         correctness = program.fitness_scores.get("correctness", settings.DEFAULT_METRIC_VALUE.get("correctness", 0.0))
@@ -54,41 +53,37 @@ class EvoSelector(SelectionControllerInterface, BaseAgent):
         # 5. Primary Focus Metrics from TaskDefinition
         if task.primary_focus_metrics:
             for metric_name in task.primary_focus_metrics:
-                if metric_name in ["runs_without_error", "llm_judge_overall_score", "correctness", "ruff_violations"]:
+                # Skip metrics already explicitly handled above
+                if metric_name in ["runs_without_error", "ai_review_score", "correctness", "ruff_violations"]: # UPDATED KEY
                     continue
 
                 value = program.fitness_scores.get(metric_name, settings.DEFAULT_METRIC_VALUE.get(metric_name, 0.0))
                 higher_is_better = settings.METRIC_OPTIMIZATION_DIRECTION.get(metric_name, True)
 
+                value = program.fitness_scores.get(metric_name, settings.DEFAULT_METRIC_VALUE.get(metric_name, 0.0))
+                higher_is_better = settings.METRIC_OPTIMIZATION_DIRECTION.get(metric_name, True)
                 if higher_is_better:
-                    # This append call is correct.
                     key_parts.append(value if isinstance(value, (int, float)) else 0.0)
-                else:  # Lower is better
+                else:
                     if value == float('inf'):
-                        # This append call is correct.
                         key_parts.append(-999999.0)
                     elif isinstance(value, (int, float)):
-                        # This append call is correct.
                         key_parts.append(-value)
                     else:
-                        # This append call is correct.
-                        key_parts.append(0.0)  # Fallback for unexpected type
+                        key_parts.append(0.0)
 
-        # 6. Default tie-breakers
-        # Runtime
-        if "runtime_ms" not in (task.primary_focus_metrics or []):
+        # 6. Default tie-breakers (as before)
+        if "runtime_ms" not in (task.primary_focus_metrics or []):  # ...
             runtime = program.fitness_scores.get("runtime_ms",
                                                  settings.DEFAULT_METRIC_VALUE.get("runtime_ms", float('inf')))
             key_parts.append(-runtime if runtime != float('inf') else -999999.0)
+        key_parts.append(program.generation)
 
-        # Generation
-        key_parts.append(program.generation)  # This is an int, append is fine.
-
-        # Final numeric conversion was removed as appends now ensure numeric types or handle fallbacks.
+        # Optional: Update the debug log message if it was uncommented and used
         # logger.debug(
         #     f"ProgID: {program.id}, Gen: {program.generation}, "
-        #     f"RunsOK: {runs_ok_score}, Judge: {llm_judge_score:.1f}, Correct: {correctness:.2f}, RuffV: {ruff_violations}, "
-        #     f"Sort Key: {key_parts}" # key_parts is now guaranteed to be list of numbers
+        #     f"RunsOK: {runs_ok_score}, AIReview: {ai_review_score_value:.1f}, Correct: {correctness:.2f}, RuffV: {ruff_violations}, " # UPDATED
+        #     f"Sort Key: {key_parts}"
         # )
         return tuple(key_parts)
 
@@ -122,7 +117,7 @@ class EvoSelector(SelectionControllerInterface, BaseAgent):
             key_tuple = self._get_program_sort_key(p_val, task)
             formatted_key = tuple(f"{x:.2f}" if isinstance(x, float) else x for x in key_tuple)
             top_program_details.append(
-                f"ID:{p_val.id} Key:{formatted_key} JudgeScore:{p_val.fitness_scores.get('llm_judge_overall_score', 'N/A')}")
+                f"ID:{p_val.id} Key:{formatted_key} ReviewScore:{p_val.fitness_scores.get('ai_review_score', 'N/A')}")
         logger.debug(f"Population sorted for parent selection. Top candidates: [{'; '.join(top_program_details)}]")
 
         parents: List[Program] = []
@@ -143,14 +138,14 @@ class EvoSelector(SelectionControllerInterface, BaseAgent):
 
         fitness_values_for_roulette = []
         for p_roulette in roulette_candidate_pool:
-            score = p_roulette.fitness_scores.get("llm_judge_overall_score")
+            score = p_roulette.fitness_scores.get("ai_review_score")
             if score is None:
                 score = p_roulette.fitness_scores.get("correctness", 0.0)
             fitness_values_for_roulette.append(max(score, 0.0) + 0.0001)
 
         total_fitness_roulette = sum(fitness_values_for_roulette)
         logger.debug(
-            f"Total fitness for roulette wheel (among {len(roulette_candidate_pool)} candidates, using LLM judge score or correctness): {total_fitness_roulette:.4f}")
+            f"Total fitness for roulette wheel (among {len(roulette_candidate_pool)} candidates, using ai review score or correctness): {total_fitness_roulette:.4f}")
 
         if total_fitness_roulette <= (0.0001 * len(roulette_candidate_pool)) + 1e-9:
             logger.warning(

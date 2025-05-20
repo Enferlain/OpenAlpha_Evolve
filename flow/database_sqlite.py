@@ -1,5 +1,5 @@
 # database_agent/database_sqlite.py
-# Version: 1.1.0 (Adding LLM Judge Feedback persistence)
+# Version: 1.1.0 (Adding LLM Review Feedback persistence)
 
 import sqlite3
 import json
@@ -7,7 +7,7 @@ import logging
 import asyncio
 from typing import List, Dict, Any, Optional, Literal
 
-from core.interfaces import DatabaseAgentInterface, Program, BaseAgent
+from core.interfaces import DatabaseInterface, Program, BaseAgent
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -16,7 +16,7 @@ DB_FILE_PATH = settings.DATABASE_PATH if settings.DATABASE_PATH and settings.DAT
     ".db") else "alpha_evolve_programs.db"
 
 
-class SQLiteStore(DatabaseAgentInterface, BaseAgent):
+class SQLiteStore(DatabaseInterface, BaseAgent):
     def __init__(self, db_file: Optional[str] = None):
         super().__init__()
         self.db_file = db_file if db_file else DB_FILE_PATH
@@ -48,7 +48,7 @@ class SQLiteStore(DatabaseAgentInterface, BaseAgent):
 
     # --- MODIFIED: _ensure_table (Blueprint Step 6) ---
     async def _ensure_table(self) -> None:  # Method_v1.1.0
-        """Creates the 'programs' table if it doesn't exist, including ai_feedback."""
+        """Creates the 'programs' table if it doesn't exist, including ai_review_feedback."""
         logger.info(f"Ensuring 'programs' table exists in SQLite database: {self.db_file}")
         create_table_query = """
             CREATE TABLE IF NOT EXISTS programs (
@@ -62,7 +62,7 @@ class SQLiteStore(DatabaseAgentInterface, BaseAgent):
                 status TEXT NOT NULL,
                 task_id TEXT,
                 creation_method TEXT,
-                ai_feedback TEXT  -- NEW COLUMN for LLM Judge's textual feedback
+                ai_review_feedback TEXT  -- NEW COLUMN for LLM reviewer's textual feedback
             )
         """
         await asyncio.to_thread(
@@ -70,7 +70,7 @@ class SQLiteStore(DatabaseAgentInterface, BaseAgent):
             create_table_query,
             params=(), commit=True
         )
-        logger.info(f"'programs' table ensured (with ai_feedback column) in {self.db_file}.")
+        logger.info(f"'programs' table ensured (with ai_review_feedback column) in {self.db_file}.")
 
     async def setup_db(self) -> None:
         await self._ensure_table()
@@ -87,7 +87,7 @@ class SQLiteStore(DatabaseAgentInterface, BaseAgent):
             # Ensure all expected keys are present in the row object
             # This uses .get() with a default for the new column to be robust
             # if loading from an older DB schema that doesn't have it yet (though CREATE TABLE adds it).
-            ai_feedback_value = row["ai_feedback"] if "ai_feedback" in row.keys() else None
+            ai_review_feedback_value = row["ai_review_feedback"] if "ai_review_feedback" in row.keys() else None
 
             return Program(
                 id=row["id"],
@@ -100,7 +100,7 @@ class SQLiteStore(DatabaseAgentInterface, BaseAgent):
                 status=row["status"],
                 task_id=row["task_id"],
                 creation_method=row["creation_method"] if "creation_method" in row.keys() else "unknown",
-                ai_feedback=ai_feedback_value  # NEW: Load the feedback
+                ai_review_feedback=ai_review_feedback_value  # NEW: Load the feedback
             )
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding JSON for program ID {row['id']} from {self.db_file}: {e}", exc_info=True)
@@ -127,13 +127,13 @@ class SQLiteStore(DatabaseAgentInterface, BaseAgent):
         errors_json = json.dumps(program.errors)
         parent_ids_json = json.dumps(program.parent_ids) if program.parent_ids is not None else None
 
-        # Ensure ai_feedback is None if not set, not an empty string from Program default if that changed.
+        # Ensure ai_review_feedback is None if not set, not an empty string from Program default if that changed.
         # Program dataclass default is None, so this should be fine.
-        ai_feedback_to_save = program.ai_feedback
+        ai_review_feedback_to_save = program.ai_review_feedback
 
         save_query = """
             INSERT OR REPLACE INTO programs 
-            (id, code, fitness_scores, generation, parent_id, parent_ids, errors, status, task_id, creation_method, ai_feedback)
+            (id, code, fitness_scores, generation, parent_id, parent_ids, errors, status, task_id, creation_method, ai_review_feedback)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         params = (
@@ -147,7 +147,7 @@ class SQLiteStore(DatabaseAgentInterface, BaseAgent):
             program.status,
             program.task_id,
             program.creation_method,
-            ai_feedback_to_save  # NEW: Save the feedback
+            ai_review_feedback_to_save  # NEW: Save the feedback
         )
         await asyncio.to_thread(
             self._execute_blocking_query,
@@ -158,7 +158,7 @@ class SQLiteStore(DatabaseAgentInterface, BaseAgent):
 
     # --- get_program, get_all_programs, get_best_programs, get_programs_for_next_generation, count_programs, clear_database, execute ---
     # These methods do not need to change for this specific update, as they rely on _program_from_row
-    # or operate on all columns / don't directly interact with ai_feedback beyond what _program_from_row provides.
+    # or operate on all columns / don't directly interact with ai_review_feedback beyond what _program_from_row provides.
     # (The existing implementations of these methods will be used)
 
     async def get_program(self, program_id: str) -> Optional[Program]:
@@ -167,7 +167,7 @@ class SQLiteStore(DatabaseAgentInterface, BaseAgent):
         row = await asyncio.to_thread(
             self._execute_blocking_query, query, (program_id,), fetch_one=True
         )
-        program = self._program_from_row(row)  # Will now include ai_feedback
+        program = self._program_from_row(row)  # Will now include ai_review_feedback
         if program:
             logger.info(f"Retrieved program ID: {program.id} from SQLite: {self.db_file}")
         else:
@@ -184,7 +184,7 @@ class SQLiteStore(DatabaseAgentInterface, BaseAgent):
         return valid_programs
 
     # For get_best_programs, the sorting happens in Python based on fitness_scores, which will
-    # now naturally include llm_judge_overall_score if SelectionController uses it.
+    # now naturally include ai_review_score if SelectionController uses it.
     async def get_best_programs(
             self,
             task_id: str,

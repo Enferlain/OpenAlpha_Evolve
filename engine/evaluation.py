@@ -21,7 +21,7 @@ from typing import Optional, Dict, Any, Tuple, Union, List
 # from pylint.reporters.text import TextReporter # REMOVED
 from core.interfaces import (
     SolutionEvaluatorInterface, Program, TaskDefinition,
-    PromptDesignerInterface, CodeGeneratorInterface # NEW: For calling judge LLM
+    PromptDesignerInterface, CodeGeneratorInterface # NEW: For calling LLM review
 )
 from config import settings
 
@@ -104,79 +104,34 @@ def run_ruff_in_thread(file_path: str, project_root: str) -> Tuple[List[Dict[str
     logger.debug(f"Ruff analysis for {file_path} completed. Violations found: {violations_count}")
     return violations_list, violations_count
 
-# --- NEW: Helper to format execution/Ruff feedback for LLM Judge prompt ---
-def _format_ai_summary(self, program: Program, max_errors_to_show: int = 3) -> Tuple[str, str]:
-    """
-    Formats execution errors/logs and Ruff issues for the LLM Judge prompt.
-    Returns (formatted_execution_summary, formatted_ruff_summary)
-    """
-    # Execution Summary
-    exec_feedback_lines = []
-    execution_related_errors = [
-        e for e in program.errors
-        if "Execution Log (STDOUT" in e or \
-           "Execution Log (STDERR" in e or \
-           "Standalone script execution failed" in e or \
-           "ExecutionFailure: ImportError" in e or # Specific import error
-           "I/O Test Harness Error" in e # Error from I/O harness
-    ]
-
-    if execution_related_errors:
-        for i, err_log in enumerate(execution_related_errors):
-            if i < max_errors_to_show:
-                # Remove potential multiple newlines for conciseness in prompt
-                exec_feedback_lines.append(f"  - {err_log.replace(chr(10)+chr(10), chr(10)).strip()}")
-            else:
-                exec_feedback_lines.append(f"  ... and {len(execution_related_errors) - max_errors_to_show} more execution-related messages.")
-                break
-    else:
-        exec_feedback_lines.append("  - No specific execution issues or logs captured beyond run status.")
-    formatted_execution_summary = "\n".join(exec_feedback_lines)
-
-    # Ruff Summary
-    ruff_feedback_lines = []
-    ruff_issues = [e for e in program.errors if e.startswith("Ruff-")]
-    if ruff_issues:
-        for i, ruff_issue in enumerate(ruff_issues):
-            if i < max_errors_to_show:
-                ruff_feedback_lines.append(f"  - {ruff_issue.strip()}")
-            else:
-                ruff_feedback_lines.append(f"  ... and {len(ruff_issues) - max_errors_to_show} more Ruff issues.")
-                break
-    else:
-        ruff_feedback_lines.append("  - No Ruff issues reported.")
-    formatted_ruff_summary = "\n".join(ruff_feedback_lines)
-
-    return formatted_execution_summary, formatted_ruff_summary
-
 
 class SolutionEvaluator(SolutionEvaluatorInterface):
     def __init__(self,
                  task_definition: Optional[TaskDefinition] = None,
                  prompt_designer: Optional[PromptDesignerInterface] = None, # NEW
-                 code_generator_for_judge: Optional[CodeGeneratorInterface] = None # NEW
+                 ai_review_model_caller: Optional[CodeGeneratorInterface] = None # NEW
                 ):
         super().__init__(config=None)
         self.task_definition = task_definition # For overall context
         self.evaluation_timeout_seconds = settings.EVALUATION_TIMEOUT_SECONDS
 
-        # Agents needed for LLM-as-Judge functionality
+        # Agents needed for LLM-as-reviewer functionality
         # These could be passed in or instantiated here. For now, let's assume they can be set up.
         # In EvolveFlow, these would be passed from its own instances.
         self.prompt_designer = prompt_designer
-        self.code_generator_for_judge = code_generator_for_judge
+        self.ai_review_model_caller = ai_review_model_caller
 
-        # Judge LLM model name (can be different from code generation model)
-        self.judge_llm_model_name = settings.EVALUATION_MODEL_NAME # From settings.py
-        self.judge_llm_temperature = 0.3 # Typically lower temp for more factual/consistent judging
+        # reviewer LLM model name (can be different from code generation model)
+        self.ai_reviewer_model_name = settings.EVALUATION_MODEL_NAME # From settings.py
+        self.ai_reviewer_temperature = 0.3 # Typically lower temp for more factual/consistent judging
 
-        logger.info(f"SolutionEvaluator initialized. Timeout: {self.evaluation_timeout_seconds}s. Judge Model: {self.judge_llm_model_name}")
+        logger.info(f"SolutionEvaluator initialized. Timeout: {self.evaluation_timeout_seconds}s. Ai Reviewer Model: {self.ai_reviewer_model_name}")
         if self.task_definition:
             logger.info(f"SolutionEvaluator task_definition ID: {self.task_definition.id}")
-        if not self.prompt_designer or not self.code_generator_for_judge:
-            logger.warning("SolutionEvaluator initialized WITHOUT prompt_designer or code_generator_for_judge. LLM-as-Judge functionality will be disabled.")
+        if not self.prompt_designer or not self.ai_review_model_caller:
+            logger.warning("SolutionEvaluator initialized WITHOUT prompt_designer or ai_review_model_caller. LLM-as-reviewer functionality will be disabled.")
 
-    async def _ruin_script(
+    async def _run_script(
             self,
             program_id: str,  # For logging
             code: str,
@@ -188,7 +143,7 @@ class SolutionEvaluator(SolutionEvaluatorInterface):
         """
         effective_timeout = timeout_seconds if timeout_seconds is not None else self.evaluation_timeout_seconds
         logger.debug(
-            f"[_ruin_script] Attempting to run program ID: {program_id} as standalone script. Timeout: {effective_timeout}s.")
+            f"[_run_script] Attempting to run program ID: {program_id} as standalone script. Timeout: {effective_timeout}s.")
 
         temp_dir = tempfile.mkdtemp()
         temp_file_path = os.path.join(temp_dir, f"script_{program_id}.py")
@@ -198,7 +153,7 @@ class SolutionEvaluator(SolutionEvaluatorInterface):
                 f.write(code)
         except Exception as e_write:
             logger.error(
-                f"[_ruin_script] Failed to write code for {program_id} to temp file {temp_file_path}: {e_write}")
+                f"[_run_script] Failed to write code for {program_id} to temp file {temp_file_path}: {e_write}")
             return False, "", f"Error writing script to temp file: {e_write}", None
 
         cmd = [sys.executable, temp_file_path]
@@ -207,7 +162,7 @@ class SolutionEvaluator(SolutionEvaluatorInterface):
         end_time_exec = 0.0
 
         try:
-            logger.debug(f"[_ruin_script] Executing: {' '.join(cmd)} in {temp_dir}")
+            logger.debug(f"[_run_script] Executing: {' '.join(cmd)} in {temp_dir}")
             start_time_exec = time.monotonic()
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -223,9 +178,9 @@ class SolutionEvaluator(SolutionEvaluatorInterface):
             stderr_str = stderr_bytes.decode('utf-8', errors='replace').strip()
 
             logger.debug(
-                f"[_ruin_script] {program_id} finished. RC: {proc.returncode}, Time: {execution_time_ms:.2f}ms")
-            if stdout_str: logger.debug(f"[_ruin_script] {program_id} STDOUT:\n{stdout_str}")
-            if stderr_str: logger.debug(f"[_ruin_script] {program_id} STDERR:\n{stderr_str}")
+                f"[_run_script] {program_id} finished. RC: {proc.returncode}, Time: {execution_time_ms:.2f}ms")
+            if stdout_str: logger.debug(f"[_run_script] {program_id} STDOUT:\n{stdout_str}")
+            if stderr_str: logger.debug(f"[_run_script] {program_id} STDERR:\n{stderr_str}")
 
             runs_ok = proc.returncode == 0
             return runs_ok, stdout_str, stderr_str, execution_time_ms
@@ -238,11 +193,11 @@ class SolutionEvaluator(SolutionEvaluatorInterface):
                     pass
                 except Exception as e_kill:
                     logger.error(f"Error killing timed-out process for {program_id}: {e_kill}")
-            logger.warning(f"[_ruin_script] {program_id} execution timed out after {effective_timeout}s.")
+            logger.warning(f"[_run_script] {program_id} execution timed out after {effective_timeout}s.")
             return False, "", f"Execution timed out after {effective_timeout} seconds.", (
                                                                                                      time.monotonic() - start_time_exec) * 1000
         except Exception as e_exec:
-            logger.error(f"[_ruin_script] Unexpected error executing {program_id}: {e_exec}",
+            logger.error(f"[_run_script] Unexpected error executing {program_id}: {e_exec}",
                          exc_info=True)
             exec_time = (time.monotonic() - start_time_exec) * 1000 if start_time_exec > 0 else None
             return False, "", f"Unexpected execution error: {type(e_exec).__name__} - {str(e_exec)}", exec_time
@@ -688,41 +643,41 @@ print(json.dumps(final_output, default=custom_json_serializer))
 
     async def _get_ai_review(self,
                                 task: TaskDefinition,
-                                program_to_judge: Program,
+                                program_to_review: Program,
                                 execution_summary_for_judge: Dict[str, Any]
                                 ) -> Tuple[Optional[float], Optional[str]]:
-        if not self.prompt_designer or not self.code_generator_for_judge:
+        if not self.prompt_designer or not self.ai_review_model_caller:
             logger.warning(
-                f"LLM Judge cannot be invoked for {program_to_judge.id}: Missing prompt_designer or code_generator_for_judge.")
-            return None, "LLM Judge components not configured."
+                f"ai review cannot be invoked for {program_to_review.id}: Missing prompt_designer or ai_review_model_caller.")
+            return None, "ai review components not configured."
 
-        if not task.ai_criteria:
+        if not task.ai_review_criteria:
             logger.info(
-                f"No ai_criteria for task {task.id}. Skipping LLM Judge for {program_to_judge.id}.")
-            return None, "No user guidelines provided for LLM Judge."
+                f"No ai_review_criteria for task {task.id}. Skipping ai review for {program_to_review.id}.")
+            return None, "No user guidelines provided for ai review."
 
-        judge_prompt = self.prompt_designer.judge_prompt(
+        ai_review_prompt = self.prompt_designer.ai_review_prompt(
             task=task,
-            program_to_judge=program_to_judge,
+            program_to_review=program_to_review,
             execution_summary=execution_summary_for_judge
         )
 
         raw_judge_response_from_llm = ""
         cleaned_response_for_json = ""  # Initialize here
         try:
-            logger.info(f"Calling Judge LLM ({self.judge_llm_model_name}) for program {program_to_judge.id}...")
-            raw_judge_response_from_llm = await self.code_generator_for_judge.generate_code(
-                prompt=judge_prompt,
-                model_name=self.judge_llm_model_name,
-                temperature=self.judge_llm_temperature,
+            logger.info(f"Calling reviewer LLM ({self.ai_reviewer_model_name}) for program {program_to_review.id}...")
+            raw_judge_response_from_llm = await self.ai_review_model_caller.generate_code(
+                prompt=ai_review_prompt,
+                model_name=self.ai_reviewer_model_name,
+                temperature=self.ai_reviewer_temperature,
                 output_format="code"
             )
 
             if not raw_judge_response_from_llm.strip():
-                logger.warning(f"LLM Judge for {program_to_judge.id} returned an empty response.")
-                return None, "LLM Judge returned empty response."
+                logger.warning(f"ai review for {program_to_review.id} returned an empty response.")
+                return None, "ai review returned empty response."
 
-            logger.debug(f"Raw response from Judge LLM for {program_to_judge.id}: {raw_judge_response_from_llm}")
+            logger.debug(f"Raw response from reviewer LLM for {program_to_review.id}: {raw_judge_response_from_llm}")
 
             cleaned_response_for_json = raw_judge_response_from_llm.strip()  # Assign here
             if cleaned_response_for_json.lower().startswith("json\n"):
@@ -741,28 +696,28 @@ print(json.dumps(final_output, default=custom_json_serializer))
 
             if score is None or justification is None:
                 logger.warning(
-                    f"LLM Judge response for {program_to_judge.id} missing 'overall_score' or 'justification'. Cleaned: {cleaned_response_for_json}")
-                return None, f"LLM Judge response malformed. Cleaned: {cleaned_response_for_json[:200]}"
+                    f"ai review response for {program_to_review.id} missing 'overall_score' or 'justification'. Cleaned: {cleaned_response_for_json}")
+                return None, f"ai review response malformed. Cleaned: {cleaned_response_for_json[:200]}"
 
             return float(score), str(justification)
 
         except json.JSONDecodeError as e:
             logger.error(
-                f"Failed to decode JSON from LLM Judge for {program_to_judge.id}: {e}. "
+                f"Failed to decode JSON from ai review for {program_to_review.id}: {e}. "
                 f"Raw response was: '{raw_judge_response_from_llm}'. "
                 f"Cleaned attempt was: '{cleaned_response_for_json}'",  # Now always defined
                 exc_info=True)
-            return None, f"LLM Judge JSONDecodeError. Cleaned attempt: {cleaned_response_for_json[:200]}"
+            return None, f"ai review JSONDecodeError. Cleaned attempt: {cleaned_response_for_json[:200]}"
         except Exception as e_judge:
-            logger.error(f"Error during LLM Judge invocation for {program_to_judge.id}: {e_judge}", exc_info=True)
-            return None, f"LLM Judge invocation error: {type(e_judge).__name__}. Response (if any): {raw_judge_response_from_llm[:200]}"
+            logger.error(f"Error during ai review invocation for {program_to_review.id}: {e_judge}", exc_info=True)
+            return None, f"ai review invocation error: {type(e_judge).__name__}. Response (if any): {raw_judge_response_from_llm[:200]}"
 
-    # --- MODIFIED: evaluate_program (Integrate LLM-as-Judge call) ---
+    # --- MODIFIED: evaluate_program (Integrate LLM-as-reviewer call) ---
     async def evaluate_program(self, program: Program, task: TaskDefinition) -> Program:
         logger.debug(f"[evaluate_program] Starting for Program ID: {program.id}, Task ID: {task.id}")
         program.status = "evaluating"
         program.errors = [] # Clear previous errors
-        program.ai_feedback = None # Clear previous judge feedback
+        program.ai_review_feedback = None # Clear previous judge feedback
 
         default_scores = {
             "correctness": 0.0, "runtime_ms": float('inf'),
@@ -772,7 +727,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
             "total_tests": float(len(task.io_examples) if task.io_examples else 0),
             "runs_without_error": False,
             "standalone_script_runtime_ms": float('inf'),
-            "llm_judge_overall_score": settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0) # NEW
+            "ai_review_score": settings.DEFAULT_METRIC_VALUE.get("ai_review_score", 0.0) # NEW
         }
         program.fitness_scores = {**default_scores, **(program.fitness_scores if program.fitness_scores else {})}
 
@@ -909,7 +864,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
 
             if should_attempt_standalone_run:
                 logger.info(f"[evaluate_program] Attempting standalone execution for {program.id} based on task configuration.")
-                runs_ok, script_stdout, script_stderr, script_exec_time_ms = await self._ruin_script(
+                runs_ok, script_stdout, script_stderr, script_exec_time_ms = await self._run_script(
                     program_id=program.id,
                     code=program.code,
                     timeout_seconds=self.evaluation_timeout_seconds # Or a specific timeout for this step
@@ -926,7 +881,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
                     logger.warning(f"[evaluate_program] {error_log_msg.splitlines()[0]}")
                 else:
                     logger.info(f"[evaluate_program] Standalone script {program.id} executed successfully.")
-                    if script_stdout: program.errors.append(f"Execution Log (STDOUT for {program.id}):\n{script_stdout}") # Log stdout for LLM judge
+                    if script_stdout: program.errors.append(f"Execution Log (STDOUT for {program.id}):\n{script_stdout}") # Log stdout for ai review
                     if script_stderr: program.errors.append(f"Execution Log (STDERR for {program.id} - non-fatal):\n{script_stderr}") # Log stderr even if RC 0
 
             # 4. Functional Evaluation
@@ -1012,11 +967,11 @@ print(json.dumps(final_output, default=custom_json_serializer))
                     task, program, current_exec_summary
                 )
                 if judge_score is not None:
-                    program.fitness_scores["llm_judge_overall_score"] = judge_score
+                    program.fitness_scores["ai_review_score"] = judge_score
                 if judge_justification is not None:
-                    program.ai_feedback = judge_justification
+                    program.ai_review_feedback = judge_justification
                 if judge_score is None and judge_justification: # If scoring failed but got some feedback
-                    program.errors.append(f"LLM Judge Note: {judge_justification}")
+                    program.errors.append(f"ai review Note: {judge_justification}")
 
             # --- UNTANGLED AND REFINED Final Status Determination Logic ---
             if program.status == "evaluating":  # Check if status hasn't been set to a critical failure already

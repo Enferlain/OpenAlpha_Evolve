@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional, Literal
 import uuid
 
 from core.interfaces import (
-    DatabaseAgentInterface,
+    DatabaseInterface,
     Program,
     BaseAgent,
 )
@@ -11,12 +11,12 @@ from core.interfaces import (
 
 logger = logging.getLogger(__name__)
 
-class InMemoryDatabaseAgent(DatabaseAgentInterface, BaseAgent):
+class InMemoryStore(DatabaseInterface, BaseAgent):
     """An in-memory database for storing and retrieving programs."""
     def __init__(self):
         super().__init__()
         self._programs: Dict[str, Program] = {}
-        logger.info("InMemoryDatabaseAgent initialized.")
+        logger.info("InMemoryStore initialized.")
 
     async def save_program(self, program: Program) -> None:
         logger.info(f"Saving program: {program.id} (Generation: {program.generation}) to in-memory database.")
@@ -126,5 +126,5 @@ class InMemoryDatabaseAgent(DatabaseAgentInterface, BaseAgent):
         logger.info("In-memory database cleared.")
 
     async def execute(self, *args, **kwargs) -> Any:
-        logger.warning("InMemoryDatabaseAgent.execute() called, but this agent uses specific methods for DB operations.")
-        raise NotImplementedError("InMemoryDatabaseAgent does not have a generic execute. Use specific methods like save_program, get_program etc.")
+        logger.warning("InMemoryStore.execute() called, but this agent uses specific methods for DB operations.")
+        raise NotImplementedError("InMemoryStore does not have a generic execute. Use specific methods like save_program, get_program etc.")

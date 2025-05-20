@@ -1,5 +1,5 @@
 # prompt_designer/prompting.py
-# Version: 1.1.0 (Added LLM Judge Prompt Design)
+# Version: 1.1.0 (Added LLM Reviewe Prompt Design)
 
 from typing import Optional, Dict, Any, List
 import logging
@@ -95,12 +95,12 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
                 f"Consider using these standard libraries if helpful: {', '.join(task.allowed_imports)}.\n\n")
 
         # Mention how it will be evaluated
-        if task.ai_criteria:
+        if task.ai_review_criteria:
             prompt_parts.append(
-                f"## Evaluation Focus:\nYour solution will be primarily evaluated by an AI Judge based on the following guidelines. Strive to meet these criteria:\n"
-                f"{task.ai_criteria}\n\n"
+                f"## Evaluation Focus:\nYour solution will be primarily evaluated by an Ai Reviewer based on the following guidelines. Strive to meet these criteria:\n"
+                f"{task.ai_review_criteria}\n\n"
             )
-        elif task.io_examples:  # Fallback to I/O examples if no LLM judge guidelines
+        elif task.io_examples:  # Fallback to I/O examples if no ai review guidelines
             formatted_examples = self._format_io_examples(task)
             prompt_parts.append(
                 f"## Evaluation Focus:\nYour solution will be evaluated for correctness based on input/output examples like these:\n{formatted_examples}\n\n"
@@ -166,9 +166,9 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
                 f"--- Parent {number} (ID: {parent_prog.id}, Gen: {parent_prog.generation}) ---",
                 f"Code:\n```python\n{parent_prog.code}\n```"
             ]
-            if parent_prog.ai_feedback:
+            if parent_prog.ai_review_feedback:
                 parts.append(
-                    f"Parent {number} AI Judge Assessment (Score: {parent_prog.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n{parent_prog.ai_feedback}"
+                    f"Parent {number} Ai Reviewer Assessment (Score: {parent_prog.fitness_scores.get('ai_review_score', 'N/A')}/10):\n{parent_prog.ai_review_feedback}"
                 )
             # Add brief summary of other key metrics if desired
             # ruff_v = parent_prog.fitness_scores.get('ruff_violations', 'N/A')
@@ -186,9 +186,9 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
         ]
         if task.target_solution:
             prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution}\n")
-        if task.ai_criteria:
+        if task.ai_review_criteria:
             prompt_parts.append(
-                f"## Primary Evaluation Guidelines for Child (Aim to excel here):\n{task.ai_criteria}\n"
+                f"## Primary Evaluation Guidelines for Child (Aim to excel here):\n{task.ai_review_criteria}\n"
             )
         prompt_parts.append("\n")
 
@@ -197,10 +197,10 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
 
         prompt_parts.append(
             f"--- Crossover Instructions ---\n"
-            f"Analyze both Parent 1 and Parent 2, including their code and any AI Judge assessments.\n"
+            f"Analyze both Parent 1 and Parent 2, including their code and any Ai Reviewer assessments.\n"
             f"Your goal is to create a NEW child solution that:\n"
             f"1. Effectively solves the 'Overall Goal & Context'.\n"
-            f"2. Synthesizes the best features, logic, or approaches from *both* parents, while AVOIDING flaws identified in either parent by the AI Judge.\n"
+            f"2. Synthesizes the best features, logic, or approaches from *both* parents, while AVOIDING flaws identified in either parent by the Ai Reviewer.\n"
             f"3. Aims to satisfy the 'Primary Evaluation Guidelines' better than both parents.\n"
             f"4. Adheres to any specified solution structure (e.g., target_solution) and suggested imports.\n\n"
             f"Your Response Format:\n"
@@ -306,15 +306,15 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
 
         prompt_parts.append(f"## Feedback on Current Code:\n")
 
-        if parent_program.ai_feedback:
+        if parent_program.ai_review_feedback:
             prompt_parts.append(
-                f"### AI Judge's Assessment (Overall Score: {parent_program.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n"
-                f"{parent_program.ai_feedback}\n\n"
+                f"### Ai Reviewer's Assessment (Overall Score: {parent_program.fitness_scores.get('ai_review_score', 'N/A')}/10):\n"
+                f"{parent_program.ai_review_feedback}\n\n"
             )
-        elif task.ai_criteria:
+        elif task.ai_review_criteria:
             prompt_parts.append(
                 f"### Reminder of Evaluation Guidelines (Aim for these):\n"
-                f"{task.ai_criteria}\n\n"
+                f"{task.ai_review_criteria}\n\n"
             )
 
         exec_status = "Ran successfully" if parent_program.fitness_scores.get(
@@ -339,9 +339,9 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
 
         prompt_parts.append(
             f"## Your Improvement Goal:\n"
-            f"Based on all the feedback above (especially the AI Judge's assessment if available), your goal is to significantly improve the 'Current Code'.\n"
-            f"Address the weaknesses pointed out by the AI Judge and fix any reported errors or static analysis issues.\n"
-            f"Strive to better meet the 'User's Evaluation Guidelines' (mentioned in the AI Judge's feedback or the task context).\n"
+            f"Based on all the feedback above (especially the Ai Reviewer's assessment if available), your goal is to significantly improve the 'Current Code'.\n"
+            f"Address the weaknesses pointed out by the Ai Reviewer and fix any reported errors or static analysis issues.\n"
+            f"Strive to better meet the 'User's Evaluation Guidelines' (mentioned in the Ai Reviewer's feedback or the task context).\n"
         )
         if task.refine_goals:
             prompt_parts.append(f"Also consider these specific directives: {task.refine_goals}\n")
@@ -395,18 +395,18 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
             primary_failure_reason += f"\n  - Key Error: {critical_errors_from_program[0]}"
         elif "failed_evaluation_syntax" in program.status and critical_errors_from_program:
             primary_failure_reason += f"\n  - Syntax Error: {critical_errors_from_program[0]}"
-        elif program.ai_feedback and (program.fitness_scores.get('llm_judge_overall_score', 10) <= 3):
+        elif program.ai_review_feedback and (program.fitness_scores.get('ai_review_score', 10) <= 3):
             primary_failure_reason = (
-                f"The AI Judge gave a very low score ({program.fitness_scores.get('llm_judge_overall_score')}/10) "
-                f"indicating critical flaws. Judge's Justification:\n{program.ai_feedback}")
+                f"The Ai Reviewer gave a very low score ({program.fitness_scores.get('ai_review_score')}/10) "
+                f"indicating critical flaws. Judge's Justification:\n{program.ai_review_feedback}")
 
         prompt_parts.append(f"### Primary Problem:\n{primary_failure_reason}\n\n")
 
         # *** FIXED TYPO HERE: program.fitness_scores instead of parent_program.fitness_scores ***
-        if program.ai_feedback and not (program.fitness_scores.get('llm_judge_overall_score', 10) <= 3):
+        if program.ai_review_feedback and not (program.fitness_scores.get('ai_review_score', 10) <= 3):
             prompt_parts.append(
-                f"### AI Judge's Assessment (Overall Score: {program.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n"  # Was parent_program
-                f"{program.ai_feedback}\n\n"
+                f"### Ai Reviewer's Assessment (Overall Score: {program.fitness_scores.get('ai_review_score', 'N/A')}/10):\n"  # Was parent_program
+                f"{program.ai_review_feedback}\n\n"
             )
 
         static_analysis_summary = self._format_analysis_feedback(program.errors)
@@ -466,9 +466,9 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
 
         # Feedback on Original Code
         prompt_parts.append(f"## Feedback on Original Code (that the failed diff was targeting):\n")
-        if original_program.ai_feedback:
+        if original_program.ai_review_feedback:
             prompt_parts.append(
-                f"### AI Judge's Assessment (Score: {original_program.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n{original_program.ai_feedback}\n\n"
+                f"### Ai Reviewer's Assessment (Score: {original_program.fitness_scores.get('ai_review_score', 'N/A')}/10):\n{original_program.ai_review_feedback}\n\n"
             )
 
         static_analysis_summary = self._format_analysis_feedback(original_program.errors)
@@ -489,7 +489,7 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
         prompt_parts.append(
             f"## Your New Goal (Provide Full Code):\n"
             f"Please provide the *complete, fully corrected/improved version* of the solution. "
-            f"Your new version must address the objectives from the 'Previous Attempt's Goal' (e.g., critiques from the AI Judge, specific errors, or refinement targets) and incorporate feedback on the 'Original Code'.\n"
+            f"Your new version must address the objectives from the 'Previous Attempt's Goal' (e.g., critiques from the Ai Reviewer, specific errors, or refinement targets) and incorporate feedback on the 'Original Code'.\n"
             f"Aim to satisfy the task's 'Evaluation Guidelines' (if provided to the judge previously) or general quality standards.\n\n"
             f"Your Response Format:\n"
             f"Provide *only* the complete Python code for the new version. "
@@ -501,13 +501,13 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
             f"Designed blueprint-aligned failed-diff fallback prompt:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
-    # --- MODIFIED: judge_prompt (Corrected f-string formatting) ---
-    def judge_prompt(self,
+    # --- MODIFIED: ai_review_prompt (Corrected f-string formatting) ---
+    def ai_review_prompt(self,
                                 task: TaskDefinition,
-                                program_to_judge: Program,
+                                program_to_review: Program,
                                 execution_summary: Dict[str, Any]
                                 ) -> str:  # Method_v1.0.1
-        logger.info(f"Designing LLM judge prompt for Program ID: {program_to_judge.id}, Task ID: {task.id}")
+        logger.info(f"Designing ai review prompt for Program ID: {program_to_review.id}, Task ID: {task.id}")
 
         formatted_observations = self._format_execution_summary(execution_summary)
 
@@ -518,8 +518,8 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
             f"Problem Description:\n{task.description}\n\n"
             f"Target Solution Description:\n{task.target_solution if task.target_solution else 'Not explicitly specified, infer from problem description.'}\n\n"
             f"## User's Evaluation Guidelines:\n"
-            f"Please judge the code primarily based on these guidelines:\n{task.ai_criteria if task.ai_criteria else 'No specific user guidelines provided. Use general principles of good code quality, correctness for the task, and creativity.'}\n\n"
-            f"## Code for Review:\n```python\n{program_to_judge.code}\n```\n\n"
+            f"Please judge the code primarily based on these guidelines:\n{task.ai_review_criteria if task.ai_review_criteria else 'No specific user guidelines provided. Use general principles of good code quality, correctness for the task, and creativity.'}\n\n"
+            f"## Code for Review:\n```python\n{program_to_review.code}\n```\n\n"
             f"## Observations from Automated Checks:\n{formatted_observations}\n\n"
             f"## Your Evaluation Task:\n"
             f"1. Carefully review the \"Code for Review\" in light of the \"Task Context & Goal\" and, most importantly, the \"User's Evaluation Guidelines.\"\n"
@@ -530,7 +530,7 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
             f"Please output *only* the JSON object.\n"
         )
         logger.debug(
-            f"Designed LLM Judge Prompt for {program_to_judge.id}:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
+            f"Designed ai review Prompt for {program_to_review.id}:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
     async def execute(self, *args, **kwargs) -> Any:

@@ -1,5 +1,5 @@
 # monitoring_agent/monitoring.py
-# Version: 1.2.0 (Adding LLM Judge Score Logging)
+# Version: 1.2.0 (Adding LLM Review Score Logging)
 
 import logging
 import csv
@@ -23,9 +23,9 @@ DEFAULT_METRIC_FIELDS = [
     "llm_api_calls_generation",
     "avg_correctness", "best_correctness",
     "avg_ruff_violations", "min_ruff_violations",
-    # --- NEW LLM Judge Score Metrics ---
-    "avg_llm_judge_score",  # Average LLM judge score for the generation
-    "best_llm_judge_score",  # Best LLM judge score in the generation
+    # --- NEW LLM Review Score Metrics ---
+    "ai_review_score_avg",  # Average LLM Review score for the generation
+    "ai_review_score_best",  # Best LLM Review score in the generation
     # --- End NEW ---
     "avg_runtime_ms", "best_runtime_ms",
     "avg_cyclomatic_complexity", "best_cyclomatic_complexity",
@@ -60,7 +60,7 @@ class MetricsLogger(MetricsLoggerInterface, BaseAgent):
                         writer = csv.DictWriter(f, fieldnames=DEFAULT_METRIC_FIELDS)
                         writer.writeheader()
                     logger.info(
-                        f"Metrics CSV file header written to {self.metrics_file} (including LLM judge score fields).")
+                        f"Metrics CSV file header written to {self.metrics_file} (including LLM review score fields).")
                 except IOError as e:
                     logger.error(f"Failed to write CSV header to {self.metrics_file}: {e}")
         # JSONL doesn't need a header
@@ -79,9 +79,9 @@ class MetricsLogger(MetricsLoggerInterface, BaseAgent):
             if field in ["avg_ruff_violations", "min_ruff_violations", "avg_runtime_ms", "best_runtime_ms",
                          "avg_cyclomatic_complexity", "best_cyclomatic_complexity"]:
                 default_val_for_metric = float('inf')
-            elif field in ["avg_llm_judge_score", "best_llm_judge_score"]:
-                # Default LLM judge score could be 0 or a specific "not available" marker if needed
-                default_val_for_metric = settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0)
+            elif field in ["ai_review_score_avg", "ai_review_score_best"]:
+                # Default ai review score could be 0 or a specific "not available" marker if needed
+                default_val_for_metric = settings.DEFAULT_METRIC_VALUE.get("ai_review_score", 0.0)
 
             log_entry[field] = generation_data.get(field, default_val_for_metric)
 
@@ -126,9 +126,9 @@ class MetricsLogger(MetricsLoggerInterface, BaseAgent):
         avg_ruff_v = generation_data.get('avg_ruff_violations', float('nan'))
         min_ruff_v = generation_data.get('min_ruff_violations', float('nan'))
 
-        # --- NEW: LLM Judge Scores ---
-        avg_llm_score = generation_data.get('avg_llm_judge_score', float('nan'))
-        best_llm_score = generation_data.get('best_llm_judge_score', float('nan'))
+        # --- NEW: ai review Scores ---
+        avg_llm_score = generation_data.get('ai_review_score_avg', float('nan'))
+        best_llm_score = generation_data.get('ai_review_score_best', float('nan'))
         # --- END NEW ---
 
         gen_time = generation_data.get('generation_time_sec', float('nan'))
@@ -139,10 +139,10 @@ class MetricsLogger(MetricsLoggerInterface, BaseAgent):
             f"  LLM Calls this Gen: {llm_calls}",
             f"  Avg Correctness: {avg_correct * 100:.2f}% | Best Correctness: {best_correct * 100:.2f}%"
         ]
-        # Only add LLM judge scores if they are not NaN (i.e., data was available)
+        # Only add ai review scores if they are not NaN (i.e., data was available)
         if not (isinstance(avg_llm_score, float) and avg_llm_score != avg_llm_score):  # Check for NaN
             summary_lines.append(
-                f"  Avg LLM Judge Score: {avg_llm_score:.2f}/10 | Best LLM Judge Score: {best_llm_score:.2f}/10")
+                f"  Avg ai review Score: {avg_llm_score:.2f}/10 | Best ai review Score: {best_llm_score:.2f}/10")
 
         summary_lines.append(f"  Avg Ruff Violations: {avg_ruff_v:.2f} | Min Ruff Violations: {min_ruff_v:.0f}")
         summary_lines.append(f"  Generation Time: {gen_time:.2f}s")
@@ -151,7 +151,7 @@ class MetricsLogger(MetricsLoggerInterface, BaseAgent):
 
     async def log_run_summary(self, best_program_overall: Optional[Program], total_runtime_sec: float,
                                 task_id: str,
-                                total_llm_api_calls_session: int):  # Method_v1.1.0 (Added llm_judge_overall_score to summary)
+                                total_llm_api_calls_session: int):  # Method_v1.1.0 (Added ai_review_score to summary)
         logger.info("--- Evolutionary Run Final Summary ---")
         logger.info(f"Task ID: {task_id}")
         logger.info(f"Total Run Time: {total_runtime_sec:.2f} seconds")
@@ -165,12 +165,12 @@ class MetricsLogger(MetricsLoggerInterface, BaseAgent):
                 "correctness": f"{best_program_overall.fitness_scores.get('correctness', 0.0) * 100:.2f}%",
                 "ruff_violations": best_program_overall.fitness_scores.get('ruff_violations', 'N/A'),
                 "runtime_ms": f"{best_program_overall.fitness_scores.get('runtime_ms', 'N/A'):.2f}ms",
-                # --- NEW: Add LLM Judge score to final summary ---
-                "llm_judge_overall_score": f"{best_program_overall.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10"
+                # --- NEW: Add ai review score to final summary ---
+                "ai_review_score": f"{best_program_overall.fitness_scores.get('ai_review_score', 'N/A')}/10"
             }
             logger.info(f"  Fitness Summary: {fitness_summary}")
-            if best_program_overall.ai_feedback:  # Also log the feedback if available
-                logger.info(f"  LLM Judge Feedback: {best_program_overall.ai_feedback}")
+            if best_program_overall.ai_review_feedback:  # Also log the feedback if available
+                logger.info(f"  ai review Feedback: {best_program_overall.ai_review_feedback}")
             # logger.info(f"  Code:\n{best_program_overall.code}") # Careful with long code
         else:
             logger.info("No successful program was evolved to be deemed 'best overall'.")

@@ -81,30 +81,32 @@ async def run_alpha_evolve(cli_args):
 
     # 2. Handle `initial_seed_code_path` if present in the YAML
     #    This allows specifying seed code in a separate file for clarity.
-    if "initial_seed_code_path" in task_config_dict:
-        seed_code_path_str = task_config_dict.pop("initial_seed_code_path")  # Remove and process
-        if seed_code_path_str and isinstance(seed_code_path_str, str):
+    if "initial_seed_path" in task_config_dict: # Check for the path key in YAML
+        seed_path_str = task_config_dict.pop("initial_seed_path")
+        if seed_path_str and isinstance(seed_path_str, str):
             # Make path relative to the YAML file's directory or an absolute path
-            if not os.path.isabs(seed_code_path_str):
+            if not os.path.isabs(seed_path_str):
                 yaml_dir = os.path.dirname(cli_args.task_config_file)
-                resolved_seed_path = os.path.join(yaml_dir, seed_code_path_str)
+                resolved_seed_path = os.path.join(yaml_dir, seed_path_str)
             else:
-                resolved_seed_path = seed_code_path_str
+                resolved_seed_path = seed_path_str
 
             if os.path.exists(resolved_seed_path):
                 try:
                     with open(resolved_seed_path, 'r', encoding='utf-8') as sf:
-                        task_config_dict["initial_seed_code"] = sf.read()
-                    logger.info(f"Successfully loaded initial_seed_code from: {resolved_seed_path}")
+                        task_config_dict["initial_seed"] = sf.read()  # Populate 'initial_seed'
+                    logger.info(f"Successfully loaded initial_seed from: {resolved_seed_path}")
                 except Exception as e_seed:
-                    logger.error(f"Failed to read initial_seed_code from {resolved_seed_path}: {e_seed}", exc_info=True)
-                    # Decide if this is fatal. For now, we'll let TaskDefinition handle missing seed if it's crucial.
-                    task_config_dict["initial_seed_code"] = None
+                    logger.error(f"Failed to read initial_seed from {resolved_seed_path}: {e_seed}", exc_info=True)
+                    task_config_dict["initial_seed"] = None  # Ensure it's None on error
             else:
-                logger.warning(f"initial_seed_code_path specified ({resolved_seed_path}), but file not found.")
-                task_config_dict["initial_seed_code"] = None  # Ensure it's None if path is bad
-        elif seed_code_path_str:  # If it's not None but also not a string (e.g. bool, number)
-            logger.warning(f"initial_seed_code_path in YAML was not a valid path string: {seed_code_path_str}")
+                logger.warning(f"initial_seed_path specified ({resolved_seed_path}), but file not found.")
+                task_config_dict["initial_seed"] = None
+        elif seed_path_str:
+            logger.warning(f"initial_seed_path in YAML was not a valid path string: {seed_path_str}")
+            # If initial_seed_path was invalid, ensure initial_seed isn't accidentally set from it
+            if "initial_seed" not in task_config_dict:  # Only set to None if not already provided directly
+                task_config_dict["initial_seed"] = None
 
     # 3. Create TaskDefinition object
     #    The `TaskDefinition` dataclass will raise TypeError if required fields are missing
@@ -139,13 +141,12 @@ async def run_alpha_evolve(cli_args):
     if current_task.target_solution:
         logger.info(
             f"  Target solution description: '{current_task.target_solution[:100]}...'")  # Log a snippet
-    if current_task.ai_criteria:
+    if current_task.ai_review_criteria:
         logger.info(
-            f"  Evaluation guidelines for LLM judge provided (length: {len(current_task.ai_criteria)} chars).")
+            f"  Evaluation guidelines for ai review provided (length: {len(current_task.ai_review_criteria)} chars).")
 
     # 4. Initialize the Task Manager Agent
     try:
-        task_manager = EvolveFlow(task_definition=current_task)
         task_manager = EvolveFlow(task_definition=current_task)
     except ValueError as ve:  # E.g. API key not found in CodeProducer's init
         logger.error(f"Configuration error during EvolveFlow initialization: {ve}", exc_info=True)

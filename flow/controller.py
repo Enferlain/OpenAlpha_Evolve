@@ -1,5 +1,5 @@
 # task_manager/controller.py
-# Version: 1.1.0 (Adding LLM Judge Score calculation for monitoring)
+# Version: 1.1.0 (Adding LLM Review Score calculation for monitoring)
 
 import logging
 import asyncio
@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional, Union
 
 from core.interfaces import (
     TaskManagerInterface, TaskDefinition, Program, PromptDesignerInterface, CodeGeneratorInterface, SolutionEvaluatorInterface,
-    DatabaseAgentInterface, SelectionControllerInterface,
+    DatabaseInterface, SelectionControllerInterface,
     MetricsLoggerInterface
 )
 from config import settings
@@ -43,18 +43,18 @@ class EvolveFlow(TaskManagerInterface):
         super().__init__(config)
         self.task_definition = task_definition
 
-        # Initialize agents, ensuring SolutionEvaluator gets PromptDesigner and CodeGenerator for judge calls
+        # Initialize agents, ensuring SolutionEvaluator gets PromptDesigner and CodeGenerator for ai calls
         self.prompt_designer: PromptDesignerInterface = PromptStudio(task_definition=self.task_definition)
         self.code_generator: CodeGeneratorInterface = CodeProducer()
 
-        # Pass the necessary agents to SolutionEvaluator for LLM-as-Judge
+        # Pass the necessary agents to SolutionEvaluator for LLM-as-reviewer
         self.evaluator: SolutionEvaluatorInterface = SolutionEvaluator(
             task_definition=self.task_definition,
-            prompt_designer=self.prompt_designer,  # For designing judge prompts
-            code_generator_for_judge=self.code_generator  # For making the call to the judge LLM
+            prompt_designer=self.prompt_designer,  # For designing ai review prompts
+            code_generator_for_=self.code_generator  # For making the call to the LLM
         )
 
-        self.database: DatabaseAgentInterface = SQLiteStore()
+        self.database: DatabaseInterface = SQLiteStore()
         self.selection_controller: SelectionControllerInterface = EvoSelector()
         self.monitoring_agent: MetricsLoggerInterface = MetricsLogger()
 
@@ -158,13 +158,13 @@ class EvolveFlow(TaskManagerInterface):
 
     # --- MODIFIED: _calculate_population_metrics (Blueprint Step 6 - Final part) ---
     def _calculate_population_metrics(self, population: List[Program]) -> Dict[str, Any]: # Method_v1.2.0
-        """Calculates summary statistics for a population, including LLM Judge scores."""
+        """Calculates summary statistics for a population, including LLM  scores."""
         if not population:
             return { # Return defaults for all expected metrics by MetricsLogger
                 "avg_correctness": 0.0, "best_correctness": 0.0,
                 "avg_ruff_violations": float('inf'), "min_ruff_violations": float('inf'),
-                "avg_llm_judge_score": settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0), # NEW
-                "best_llm_judge_score": settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0), # NEW
+                "ai_review_score_avg": settings.DEFAULT_METRIC_VALUE.get("ai_review_score", 0.0), # NEW
+                "ai_review_score_best": settings.DEFAULT_METRIC_VALUE.get("ai_review_score", 0.0), # NEW
                 "avg_runtime_ms": float('inf'), "best_runtime_ms": float('inf'),
                 "avg_cyclomatic_complexity": float('inf'), "best_cyclomatic_complexity": float('inf'),
                 "avg_maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", 0.0),
@@ -174,7 +174,7 @@ class EvolveFlow(TaskManagerInterface):
         metrics_data = {
             "correctness": [],
             "ruff_violations": [],
-            "llm_judge_overall_score": [], # NEW list for LLM judge scores
+            "ai_review_score": [], # NEW list for ai review scores
             "runtime_ms": [],
             "cyclomatic_complexity_avg": [],
             "maintainability_index": []
@@ -185,9 +185,9 @@ class EvolveFlow(TaskManagerInterface):
         for prog in evaluated_programs:
             metrics_data["correctness"].append(prog.fitness_scores.get("correctness", 0.0))
             metrics_data["ruff_violations"].append(prog.fitness_scores.get("ruff_violations", float('inf')))
-            # --- NEW: Collect LLM Judge Scores ---
-            metrics_data["llm_judge_overall_score"].append(
-                prog.fitness_scores.get("llm_judge_overall_score", settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0))
+            # --- NEW: Collect ai review Scores ---
+            metrics_data["ai_review_score"].append(
+                prog.fitness_scores.get("ai_review_score", settings.DEFAULT_METRIC_VALUE.get("ai_review_score", 0.0))
             )
             # --- END NEW ---
             metrics_data["runtime_ms"].append(prog.fitness_scores.get("runtime_ms", float('inf')))
@@ -215,9 +215,9 @@ class EvolveFlow(TaskManagerInterface):
             "best_correctness": safe_max(metrics_data["correctness"]),
             "avg_ruff_violations": safe_avg(metrics_data["ruff_violations"], default_val=float('inf')),
             "min_ruff_violations": safe_min(metrics_data["ruff_violations"]),
-            # --- NEW: Calculate Avg and Best LLM Judge Scores ---
-            "avg_llm_judge_score": safe_avg(metrics_data["llm_judge_overall_score"], default_val=settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0)),
-            "best_llm_judge_score": safe_max(metrics_data["llm_judge_overall_score"], default_val=settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0)),
+            # --- NEW: Calculate Avg and Best ai review Scores ---
+            "ai_review_score_avg": safe_avg(metrics_data["ai_review_score"], default_val=settings.DEFAULT_METRIC_VALUE.get("ai_review_score", 0.0)),
+            "ai_review_score_best": safe_max(metrics_data["ai_review_score"], default_val=settings.DEFAULT_METRIC_VALUE.get("ai_review_score", 0.0)),
             # --- END NEW ---
             "avg_runtime_ms": safe_avg(metrics_data["runtime_ms"], default_val=float('inf')),
             "best_runtime_ms": safe_min(metrics_data["runtime_ms"]),
@@ -448,12 +448,12 @@ class EvolveFlow(TaskManagerInterface):
         # to determine the "Primary Problem".
 
         # Heuristic: If status indicates a clear failure (not just failed I/O tests but execution/syntax)
-        # or if LLM judge gave a very low score indicating critical flaws.
+        # or if ai review gave a very low score indicating critical flaws.
         is_critical_failure_status = parent.status in ["failed_evaluation_execution", "failed_evaluation_syntax",
                                                        "failed_evaluation_internal_critical"]
-        is_very_low_judge_score = parent.fitness_scores.get('llm_judge_overall_score', 10) <= 3  # Example threshold
+        is_very_low_judge_score = parent.fitness_scores.get('ai_review_score', 10) <= 3  # Example threshold
 
-        if is_critical_failure_status or (parent.ai_feedback and is_very_low_judge_score):
+        if is_critical_failure_status or (parent.ai_review_feedback and is_very_low_judge_score):
             logger.info(
                 f"Attempting bug-fix prompt for {parent.id} due to status '{parent.status}' or low judge score.")
             # --- CORRECTED CALL: Removed error_message and execution_output ---
