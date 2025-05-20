@@ -6,7 +6,7 @@ import argparse  # For command-line arguments
 import os  # For path operations
 import yaml  # For loading YAML files (pip install PyYAML)
 
-from flow.controller import TaskManagerAgent
+from flow.controller import EvolveFlow
 from core.interfaces import TaskDefinition  # Assuming Program is also imported if needed by TaskDefinition
 from config import settings
 
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)  # Logger for main.py
 # --- Helper to convert YAML's .inf/.nan to Python's float values ---
 # PyYAML does this automatically when loading if they are unquoted,
 # but if they are strings like "float('inf')", this explicit conversion is not needed.
-# The .inf YAML standard is preferred. TaskDefinition's input_output_examples
+# The .inf YAML standard is preferred. TaskDefinition's io_examples
 # will receive actual float('inf') values if YAML has .inf
 
 async def run_alpha_evolve(cli_args):
@@ -124,34 +124,34 @@ async def run_alpha_evolve(cli_args):
     logger.info(
         f"Successfully created TaskDefinition for task: '{current_task.id}' (Mode: {current_task.improvement_mode})")
 
-    # --- CORRECTED LOGGING for initial_seed_code_or_ideas ---
-    if current_task.initial_seed_code_or_ideas:
+    # --- CORRECTED LOGGING for initial_seed ---
+    if current_task.initial_seed:
         logger.info(
-            f"  Initial seed code or ideas will be used (length: {len(current_task.initial_seed_code_or_ideas)} characters).")
+            f"  Initial seed code or ideas will be used (length: {len(current_task.initial_seed)} characters).")
     # --- END CORRECTION ---
 
     if current_task.primary_focus_metrics:
         logger.info(f"  Primary focus metrics: {current_task.primary_focus_metrics}")
-    if current_task.specific_improvement_directives:
-        logger.info(f"  Specific improvement directives: '{current_task.specific_improvement_directives}'")
+    if current_task.refine_goals:
+        logger.info(f"  Specific improvement directives: '{current_task.refine_goals}'")
 
     # New fields we might want to log for visibility:
-    if current_task.target_solution_description:
+    if current_task.target_solution:
         logger.info(
-            f"  Target solution description: '{current_task.target_solution_description[:100]}...'")  # Log a snippet
-    if current_task.evaluation_guidelines_for_llm_judge:
+            f"  Target solution description: '{current_task.target_solution[:100]}...'")  # Log a snippet
+    if current_task.ai_criteria:
         logger.info(
-            f"  Evaluation guidelines for LLM judge provided (length: {len(current_task.evaluation_guidelines_for_llm_judge)} chars).")
+            f"  Evaluation guidelines for LLM judge provided (length: {len(current_task.ai_criteria)} chars).")
 
     # 4. Initialize the Task Manager Agent
     try:
-        task_manager = TaskManagerAgent(task_definition=current_task)
-        task_manager = TaskManagerAgent(task_definition=current_task)
-    except ValueError as ve:  # E.g. API key not found in CodeGeneratorAgent's init
-        logger.error(f"Configuration error during TaskManagerAgent initialization: {ve}", exc_info=True)
+        task_manager = EvolveFlow(task_definition=current_task)
+        task_manager = EvolveFlow(task_definition=current_task)
+    except ValueError as ve:  # E.g. API key not found in CodeProducer's init
+        logger.error(f"Configuration error during EvolveFlow initialization: {ve}", exc_info=True)
         return
     except Exception as e_tm_init:
-        logger.error(f"Unexpected error during TaskManagerAgent initialization: {e_tm_init}", exc_info=True)
+        logger.error(f"Unexpected error during EvolveFlow initialization: {e_tm_init}", exc_info=True)
         return
 
     # 5. Run the evolutionary process
@@ -163,7 +163,7 @@ async def run_alpha_evolve(cli_args):
         if best_programs_found:
             logger.info(
                 f"Evolutionary run for task '{current_task.id}' completed. Best program(s) IDs: {[p.id for p in best_programs_found]}")
-            # Detailed logging of the best program is now handled by MonitoringAgent/TaskManagerAgent
+            # Detailed logging of the best program is now handled by MetricsLogger/EvolveFlow
         else:
             logger.info(
                 f"Evolutionary run for task '{current_task.id}' completed. No 'best' programs were identified by the process.")

@@ -26,8 +26,8 @@ MODEL_GEMINI_2_5_FLASH_PREVIEW = "gemini-2.5-flash-preview-04-17"
 MODEL_GEMINI_2_5_PRO_PREVIEW = "gemini-2.5-pro-preview-05-06" # Corrected name if it's 05-06
 
 # --- Select CURRENTLY Active Model for Code Generation ---
-# This is the model that CodeGeneratorAgent will use by default
-# and whose RPM limit TaskManagerAgent will primarily respect for its global semaphore.
+# This is the model that CodeProducer will use by default
+# and whose RPM limit EvolveFlow will primarily respect for its global semaphore.
 # GENERATION_MODEL_NAME = MODEL_GEMINI_2_5_FLASH_PREVIEW # Default to this one for now
 GENERATION_MODEL_NAME = MODEL_GEMINI_2_0_FLASH_LITE # Or this one for more RPM
 

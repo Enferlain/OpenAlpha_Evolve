@@ -11,11 +11,11 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
-class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
+class EvoSelector(SelectionControllerInterface, BaseAgent):
     def __init__(self):
         super().__init__()
         self.elitism_count = settings.ELITISM_COUNT
-        logger.info(f"SelectionControllerAgent initialized with elitism_count: {self.elitism_count}")
+        logger.info(f"EvoSelector initialized with elitism_count: {self.elitism_count}")
 
     # --- MODIFIED: _get_program_sort_key (Blueprint Step 5) ---
     def _get_program_sort_key(self, program: Program, task: TaskDefinition) -> Tuple:  # Method_v4.0.1
@@ -92,7 +92,7 @@ class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
         # )
         return tuple(key_parts)
 
-    # sort_programs, select_parents, select_survivors, and execute methods remain as in Version 1.1.0
+    # sort_programs, get_parents, get_survivors, and execute methods remain as in Version 1.1.0
     # (as they rely on _get_program_sort_key which is now corrected)
 
     def sort_programs(self, programs: List[Program], task: TaskDefinition) -> List[Program]:
@@ -104,7 +104,7 @@ class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
             reverse=True
         )
 
-    def select_parents(self, population: List[Program], num_parents: int, task: TaskDefinition) -> List[Program]:
+    def get_parents(self, population: List[Program], num_parents: int, task: TaskDefinition) -> List[Program]:
         logger.info(
             f"Starting parent selection. Pop size: {len(population)}, Num parents to select: {num_parents}, Task Mode: {task.improvement_mode}"
         )
@@ -181,7 +181,7 @@ class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
         logger.info(f"Total parents selected: {len(final_parents)}. IDs: {[p.id for p in final_parents]}")
         return final_parents
 
-    def select_survivors(self, current_population: List[Program], offspring_population: List[Program],
+    def get_survivors(self, current_population: List[Program], offspring_population: List[Program],
                          population_size: int, task: TaskDefinition) -> List[Program]:
         logger.info(
             f"Starting survivor selection. Current pop: {len(current_population)}, Offspring pop: {len(offspring_population)}, Target pop_size: {population_size}")
@@ -212,24 +212,24 @@ class SelectionControllerAgent(SelectionControllerInterface, BaseAgent):
         if not isinstance(task, TaskDefinition):
             raise ValueError("A TaskDefinition object must be provided in kwargs as 'task' for selection operations.")
 
-        if action == "select_parents":
+        if action == "get_parents":
             population = kwargs.get('population')
             num_parents = kwargs.get('num_parents')
             if population is None or num_parents is None:
-                raise ValueError("Missing 'population' or 'num_parents' for 'select_parents' action.")
-            return self.select_parents(population, num_parents, task)
-        elif action == "select_survivors":
+                raise ValueError("Missing 'population' or 'num_parents' for 'get_parents' action.")
+            return self.get_parents(population, num_parents, task)
+        elif action == "get_survivors":
             current_population = kwargs.get('current_population')
             offspring_population = kwargs.get('offspring_population')
             population_size = kwargs.get('population_size')
             if current_population is None or offspring_population is None or population_size is None:
-                raise ValueError("Missing arguments for 'select_survivors' action.")
-            return self.select_survivors(current_population, offspring_population, population_size, task)
+                raise ValueError("Missing arguments for 'get_survivors' action.")
+            return self.get_survivors(current_population, offspring_population, population_size, task)
         elif action == "sort_programs":
             programs_to_sort = kwargs.get('programs')
             if programs_to_sort is None:
                 raise ValueError("Missing 'programs' for 'sort_programs' action.")
             return self.sort_programs(programs_to_sort, task)
         else:
-            logger.error(f"Unknown action '{action}' for SelectionControllerAgent.execute().")
+            logger.error(f"Unknown action '{action}' for EvoSelector.execute().")
             raise ValueError(f"Unknown action: {action}")

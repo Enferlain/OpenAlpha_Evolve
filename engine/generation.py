@@ -11,7 +11,7 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-class CodeGeneratorAgent(CodeGeneratorInterface):
+class CodeProducer(CodeGeneratorInterface):
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__(config)
         if not settings.GEMINI_API_KEY:
@@ -25,7 +25,7 @@ class CodeGeneratorAgent(CodeGeneratorInterface):
         )
         self.api_call_count_session = 0 # Counter for the current session/run
         self.api_call_count_generation = 0 # Counter for the current generation, to be reset
-        logger.info(f"CodeGeneratorAgent initialized with model: {self.model_name}")
+        logger.info(f"CodeProducer initialized with model: {self.model_name}")
         # self.max_retries and self.retry_delay_seconds are not used from instance, settings are used directly
 
     async def generate_code(self, prompt: str, model_name: Optional[str] = None, temperature: Optional[float] = None, output_format: str = "code") -> str:
@@ -89,7 +89,7 @@ Make sure that the changes you propose are consistent with each other.
                 logger.debug(f"Raw response from Gemini API:\n--RESPONSE START--\n{generated_text}\n--RESPONSE END--")
                 
                 if output_format == "code":
-                    cleaned_code = self._clean_llm_output(generated_text)
+                    cleaned_code = self._clean_output(generated_text)
                     logger.debug(f"Cleaned code:\n--CLEANED CODE START--\n{cleaned_code}\n--CLEANED CODE END--")
                     return cleaned_code
                 else: # output_format == "diff"
@@ -123,7 +123,7 @@ Make sure that the changes you propose are consistent with each other.
         """Returns the total number of API calls made in the current session."""
         return self.api_call_count_session
 
-    def _clean_llm_output(self, raw_code: str) -> str:
+    def _clean_output(self, raw_code: str) -> str:
         """
         Cleans the raw output from the LLM, typically removing markdown code fences.
         Example: ```python\ncode\n``` -> code
@@ -190,7 +190,7 @@ Make sure that the changes you propose are consistent with each other.
         If output_format is 'diff', it generates a diff and applies it to parent_code_for_diff.
         Otherwise, it generates full code.
         """
-        logger.debug(f"CodeGeneratorAgent.execute called. Output format: {output_format}")
+        logger.debug(f"CodeProducer.execute called. Output format: {output_format}")
         
         generated_output = await self.generate_code(
             prompt=prompt, 

@@ -9,9 +9,9 @@ description: > # The '>' allows for multi-line strings, nice for descriptions!
   node as input and return a dictionary of node: shortest_distance_from_source. 
   Use float('inf') for unreachable nodes.
 
-function_name_to_evolve: "dijkstra"
+evolve_function: "dijkstra"
 
-input_output_examples:
+io_examples:
   - input:
       graph:
         0: {1: 4, 7: 8}
@@ -58,4 +58,4 @@ evaluation_criteria: "Correctness against all test cases using float('inf') for 
 # For a "general_refinement" task, you would add:
 # initial_seed_code_path: "path/to/your_code_to_refine.py"
 # primary_focus_metrics: ["pylint_score", "cyclomatic_complexity_avg"]
-# specific_improvement_directives: "Make the code more Pythonic and improve its Pylint rating."
+# refine_goals: "Make the code more Pythonic and improve its Pylint rating."

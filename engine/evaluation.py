@@ -20,7 +20,7 @@ from typing import Optional, Dict, Any, Tuple, Union, List
 # from pylint.lint import PyLinter # REMOVED
 # from pylint.reporters.text import TextReporter # REMOVED
 from core.interfaces import (
-    EvaluatorAgentInterface, Program, TaskDefinition,
+    SolutionEvaluatorInterface, Program, TaskDefinition,
     PromptDesignerInterface, CodeGeneratorInterface # NEW: For calling judge LLM
 )
 from config import settings
@@ -105,7 +105,7 @@ def run_ruff_in_thread(file_path: str, project_root: str) -> Tuple[List[Dict[str
     return violations_list, violations_count
 
 # --- NEW: Helper to format execution/Ruff feedback for LLM Judge prompt ---
-def _format_summary_for_llm_judge(self, program: Program, max_errors_to_show: int = 3) -> Tuple[str, str]:
+def _format_ai_summary(self, program: Program, max_errors_to_show: int = 3) -> Tuple[str, str]:
     """
     Formats execution errors/logs and Ruff issues for the LLM Judge prompt.
     Returns (formatted_execution_summary, formatted_ruff_summary)
@@ -150,7 +150,7 @@ def _format_summary_for_llm_judge(self, program: Program, max_errors_to_show: in
     return formatted_execution_summary, formatted_ruff_summary
 
 
-class EvaluatorAgent(EvaluatorAgentInterface):
+class SolutionEvaluator(SolutionEvaluatorInterface):
     def __init__(self,
                  task_definition: Optional[TaskDefinition] = None,
                  prompt_designer: Optional[PromptDesignerInterface] = None, # NEW
@@ -162,7 +162,7 @@ class EvaluatorAgent(EvaluatorAgentInterface):
 
         # Agents needed for LLM-as-Judge functionality
         # These could be passed in or instantiated here. For now, let's assume they can be set up.
-        # In TaskManagerAgent, these would be passed from its own instances.
+        # In EvolveFlow, these would be passed from its own instances.
         self.prompt_designer = prompt_designer
         self.code_generator_for_judge = code_generator_for_judge
 
@@ -170,13 +170,13 @@ class EvaluatorAgent(EvaluatorAgentInterface):
         self.judge_llm_model_name = settings.EVALUATION_MODEL_NAME # From settings.py
         self.judge_llm_temperature = 0.3 # Typically lower temp for more factual/consistent judging
 
-        logger.info(f"EvaluatorAgent initialized. Timeout: {self.evaluation_timeout_seconds}s. Judge Model: {self.judge_llm_model_name}")
+        logger.info(f"SolutionEvaluator initialized. Timeout: {self.evaluation_timeout_seconds}s. Judge Model: {self.judge_llm_model_name}")
         if self.task_definition:
-            logger.info(f"EvaluatorAgent task_definition ID: {self.task_definition.id}")
+            logger.info(f"SolutionEvaluator task_definition ID: {self.task_definition.id}")
         if not self.prompt_designer or not self.code_generator_for_judge:
-            logger.warning("EvaluatorAgent initialized WITHOUT prompt_designer or code_generator_for_judge. LLM-as-Judge functionality will be disabled.")
+            logger.warning("SolutionEvaluator initialized WITHOUT prompt_designer or code_generator_for_judge. LLM-as-Judge functionality will be disabled.")
 
-    async def _execute_standalone_script(
+    async def _ruin_script(
             self,
             program_id: str,  # For logging
             code: str,
@@ -188,7 +188,7 @@ class EvaluatorAgent(EvaluatorAgentInterface):
         """
         effective_timeout = timeout_seconds if timeout_seconds is not None else self.evaluation_timeout_seconds
         logger.debug(
-            f"[_execute_standalone_script] Attempting to run program ID: {program_id} as standalone script. Timeout: {effective_timeout}s.")
+            f"[_ruin_script] Attempting to run program ID: {program_id} as standalone script. Timeout: {effective_timeout}s.")
 
         temp_dir = tempfile.mkdtemp()
         temp_file_path = os.path.join(temp_dir, f"script_{program_id}.py")
@@ -198,7 +198,7 @@ class EvaluatorAgent(EvaluatorAgentInterface):
                 f.write(code)
         except Exception as e_write:
             logger.error(
-                f"[_execute_standalone_script] Failed to write code for {program_id} to temp file {temp_file_path}: {e_write}")
+                f"[_ruin_script] Failed to write code for {program_id} to temp file {temp_file_path}: {e_write}")
             return False, "", f"Error writing script to temp file: {e_write}", None
 
         cmd = [sys.executable, temp_file_path]
@@ -207,7 +207,7 @@ class EvaluatorAgent(EvaluatorAgentInterface):
         end_time_exec = 0.0
 
         try:
-            logger.debug(f"[_execute_standalone_script] Executing: {' '.join(cmd)} in {temp_dir}")
+            logger.debug(f"[_ruin_script] Executing: {' '.join(cmd)} in {temp_dir}")
             start_time_exec = time.monotonic()
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -223,9 +223,9 @@ class EvaluatorAgent(EvaluatorAgentInterface):
             stderr_str = stderr_bytes.decode('utf-8', errors='replace').strip()
 
             logger.debug(
-                f"[_execute_standalone_script] {program_id} finished. RC: {proc.returncode}, Time: {execution_time_ms:.2f}ms")
-            if stdout_str: logger.debug(f"[_execute_standalone_script] {program_id} STDOUT:\n{stdout_str}")
-            if stderr_str: logger.debug(f"[_execute_standalone_script] {program_id} STDERR:\n{stderr_str}")
+                f"[_ruin_script] {program_id} finished. RC: {proc.returncode}, Time: {execution_time_ms:.2f}ms")
+            if stdout_str: logger.debug(f"[_ruin_script] {program_id} STDOUT:\n{stdout_str}")
+            if stderr_str: logger.debug(f"[_ruin_script] {program_id} STDERR:\n{stderr_str}")
 
             runs_ok = proc.returncode == 0
             return runs_ok, stdout_str, stderr_str, execution_time_ms
@@ -238,11 +238,11 @@ class EvaluatorAgent(EvaluatorAgentInterface):
                     pass
                 except Exception as e_kill:
                     logger.error(f"Error killing timed-out process for {program_id}: {e_kill}")
-            logger.warning(f"[_execute_standalone_script] {program_id} execution timed out after {effective_timeout}s.")
+            logger.warning(f"[_ruin_script] {program_id} execution timed out after {effective_timeout}s.")
             return False, "", f"Execution timed out after {effective_timeout} seconds.", (
                                                                                                      time.monotonic() - start_time_exec) * 1000
         except Exception as e_exec:
-            logger.error(f"[_execute_standalone_script] Unexpected error executing {program_id}: {e_exec}",
+            logger.error(f"[_ruin_script] Unexpected error executing {program_id}: {e_exec}",
                          exc_info=True)
             exec_time = (time.monotonic() - start_time_exec) * 1000 if start_time_exec > 0 else None
             return False, "", f"Unexpected execution error: {type(e_exec).__name__} - {str(e_exec)}", exec_time
@@ -268,29 +268,29 @@ class EvaluatorAgent(EvaluatorAgentInterface):
             logger.debug(f"[_check_syntax] Unexpected syntax check error: {errors[-1]}")
         return errors
 
-    async def _execute_code_safely(
+    async def _run_sandbox(
         self,
         code: str,
         task_for_examples: TaskDefinition,
         timeout_seconds: Optional[int] = None
     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         timeout = timeout_seconds if timeout_seconds is not None else self.evaluation_timeout_seconds
-        logger.debug(f"[_execute_code_safely] Starting for func: {task_for_examples.function_name_to_evolve}, timeout: {timeout}s. Code (first 100): {code[:100].replace(chr(10), '<NL>')}")
+        logger.debug(f"[_run_sandbox] Starting for func: {task_for_examples.evolve_function}, timeout: {timeout}s. Code (first 100): {code[:100].replace(chr(10), '<NL>')}")
 
         results = {"test_outputs": [], "average_runtime_ms": 0.0}
 
-        if not task_for_examples.input_output_examples:
-            logger.warning("No input/output examples provided to _execute_code_safely.")
+        if not task_for_examples.io_examples:
+            logger.warning("No input/output examples provided to _run_sandbox.")
             return results, "No test cases to run."
 
-        if not task_for_examples.function_name_to_evolve:
-            logger.error(f"Task {task_for_examples.id} does not specify 'function_name_to_evolve'. Cannot execute code.")
-            return None, "Task definition is missing 'function_name_to_evolve'."
+        if not task_for_examples.evolve_function:
+            logger.error(f"Task {task_for_examples.id} does not specify 'evolve_function'. Cannot execute code.")
+            return None, "Task definition is missing 'evolve_function'."
 
         temp_dir = tempfile.mkdtemp()
         temp_file_path = os.path.join(temp_dir, "temp_script.py")
 
-        serializable_test_cases = copy.deepcopy(task_for_examples.input_output_examples)
+        serializable_test_cases = copy.deepcopy(task_for_examples.io_examples)
 
         def prep_for_json(obj):
             if isinstance(obj, dict):
@@ -354,7 +354,7 @@ NaN = float('nan')
 
 # The test_cases string from json.dumps will have string keys for graphs.
 raw_test_cases = {test_cases_str_for_harness} 
-function_to_test_name = "{task_for_examples.function_name_to_evolve}"
+function_to_test_name = "{task_for_examples.evolve_function}"
 
 # Make sure the function_to_test is available in the global scope
 if function_to_test_name not in globals():
@@ -437,13 +437,13 @@ def custom_json_serializer(obj):
 
 print(json.dumps(final_output, default=custom_json_serializer))
         """
-        logger.debug(f"[_execute_code_safely] Generated Test Harness Code:\n{test_harness_code}") # LOG THE FULL HARNESS
+        logger.debug(f"[_run_sandbox] Generated Test Harness Code:\n{test_harness_code}") # LOG THE FULL HARNESS
 
         with open(temp_file_path, "w") as f:
             f.write(test_harness_code)
 
         cmd = [sys.executable, temp_file_path]
-        logger.debug(f"[_execute_code_safely] Generated Test Harness Code (with int_keys_if_possible):\n{test_harness_code}")
+        logger.debug(f"[_run_sandbox] Generated Test Harness Code (with int_keys_if_possible):\n{test_harness_code}")
 
         proc = None
         try:
@@ -461,20 +461,20 @@ print(json.dumps(final_output, default=custom_json_serializer))
 
             stdout_str = stdout.decode('utf-8', errors='replace').strip()
             stderr_str = stderr.decode('utf-8', errors='replace').strip()
-            logger.debug(f"[_execute_code_safely] Subprocess finished. Return Code: {proc.returncode}")
-            logger.debug(f"[_execute_code_safely] STDOUT:\n{stdout_str}") # LOG FULL STDOUT
-            logger.debug(f"[_execute_code_safely] STDERR:\n{stderr_str}") # LOG FULL STDERR
+            logger.debug(f"[_run_sandbox] Subprocess finished. Return Code: {proc.returncode}")
+            logger.debug(f"[_run_sandbox] STDOUT:\n{stdout_str}") # LOG FULL STDOUT
+            logger.debug(f"[_run_sandbox] STDERR:\n{stderr_str}") # LOG FULL STDERR
 
             if proc.returncode != 0:
                 error_message = f"Execution failed with exit code {proc.returncode}. Stdout: '{stdout_str}'. Stderr: '{stderr_str}'"
-                logger.warning(f"[_execute_code_safely] {error_message}")
-                logger.debug(f"[_execute_code_safely] Returning: (None, '{error_message}') due to non-zero exit code.")
+                logger.warning(f"[_run_sandbox] {error_message}")
+                logger.debug(f"[_run_sandbox] Returning: (None, '{error_message}') due to non-zero exit code.")
                 return None, error_message
 
             if not stdout_str:
                  error_message = f"No output from script. Stderr: '{stderr_str}'"
-                 logger.warning(f"[_execute_code_safely] {error_message}")
-                 logger.debug(f"[_execute_code_safely] Returning: (None, '{error_message}') due to no stdout.")
+                 logger.warning(f"[_run_sandbox] {error_message}")
+                 logger.debug(f"[_run_sandbox] Returning: (None, '{error_message}') due to no stdout.")
                  return None, error_message
 
             try:
@@ -485,13 +485,13 @@ print(json.dumps(final_output, default=custom_json_serializer))
                     return json.loads(s)
 
                 parsed_output = json_loads_with_infinity(stdout_str)
-                logger.debug(f"[_execute_code_safely] Parsed execution output: {parsed_output}")
-                logger.debug(f"[_execute_code_safely] Returning: (parsed_output, None) successfully.")
+                logger.debug(f"[_run_sandbox] Parsed execution output: {parsed_output}")
+                logger.debug(f"[_run_sandbox] Returning: (parsed_output, None) successfully.")
                 return parsed_output, None
             except json.JSONDecodeError as e:
                 error_message = f"Failed to decode JSON output: {e}. Raw output: '{stdout_str}'"
-                logger.error(f"[_execute_code_safely] {error_message}")
-                logger.debug(f"[_execute_code_safely] Returning: (None, '{error_message}') due to JSONDecodeError.")
+                logger.error(f"[_run_sandbox] {error_message}")
+                logger.debug(f"[_run_sandbox] Returning: (None, '{error_message}') due to JSONDecodeError.")
                 return None, error_message
             except Exception as e:
                 error_message = f"Error processing script output: {e}. Raw output: '{stdout_str}'"
@@ -508,13 +508,13 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 except Exception as e_kill:
                     logger.error(f"Error trying to kill timed-out process: {e_kill}")
             error_message = f"Execution timed out after {timeout} seconds."
-            logger.warning(f"[_execute_code_safely] {error_message}")
-            logger.debug(f"[_execute_code_safely] Returning: (None, '{error_message}') due to TimeoutError.")
+            logger.warning(f"[_run_sandbox] {error_message}")
+            logger.debug(f"[_run_sandbox] Returning: (None, '{error_message}') due to TimeoutError.")
             return None, error_message
         except Exception as e:
             error_message = f"Unexpected execution error: {str(e)}"
-            logger.error(f"[_execute_code_safely] An unexpected error occurred: {e}", exc_info=True)
-            logger.debug(f"[_execute_code_safely] Returning: (None, '{error_message}') due to unexpected Exception.")
+            logger.error(f"[_run_sandbox] An unexpected error occurred: {e}", exc_info=True)
+            logger.debug(f"[_run_sandbox] Returning: (None, '{error_message}') due to unexpected Exception.")
             return None, error_message
         finally:
             try:
@@ -524,22 +524,22 @@ print(json.dumps(final_output, default=custom_json_serializer))
                     os.rmdir(temp_dir)
             except Exception as e_cleanup:
                 logger.error(f"Error during cleanup of temp files: {e_cleanup}")
-            logger.debug(f"[_execute_code_safely] Cleanup of temp files attempted for {temp_file_path}")
+            logger.debug(f"[_run_sandbox] Cleanup of temp files attempted for {temp_file_path}")
 
-    def _assess_correctness(self, execution_results: Dict[str, Any], expected_outputs: List[Dict[str, Any]]) -> Tuple[
+    def _check_correctness(self, execution_results: Dict[str, Any], expected_outputs: List[Dict[str, Any]]) -> Tuple[
         float, int, int]:
         passed_tests = 0
         total_tests = len(expected_outputs)
 
         if not execution_results or "test_outputs" not in execution_results:
-            logger.warning("[_assess_correctness] Execution results are missing 'test_outputs' field.")
+            logger.warning("[_check_correctness] Execution results are missing 'test_outputs' field.")
             return 0.0, 0, total_tests
 
         actual_test_outputs_from_json = execution_results["test_outputs"]
 
         if len(actual_test_outputs_from_json) != total_tests:
             logger.warning(
-                f"[_assess_correctness] Mismatch in number of test outputs ({len(actual_test_outputs_from_json)}) and expected outputs ({total_tests}).")
+                f"[_check_correctness] Mismatch in number of test outputs ({len(actual_test_outputs_from_json)}) and expected outputs ({total_tests}).")
 
         for i, expected_case in enumerate(expected_outputs):
             actual_output_detail_json = next(
@@ -562,7 +562,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
                         except ValueError:
                             # If a key cannot be int, it might be a different kind of output, or an error
                             logger.warning(
-                                f"[_assess_correctness] Test case {i}: Could not convert actual output key '{k_str}' to int. Keeping as string.")
+                                f"[_check_correctness] Test case {i}: Could not convert actual output key '{k_str}' to int. Keeping as string.")
                             processed_actual_output[k_str] = v_val
                 else:  # If actual output isn't a dict, use it as is (e.g. a single value, list)
                     processed_actual_output = actual_output_from_llm_json
@@ -573,7 +573,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
                     passed_tests += 1
                 else:
                     # For debugging, it's useful to see both, and their types
-                    logger.debug(f"[_assess_correctness] Test case {i} FAILED:")
+                    logger.debug(f"[_check_correctness] Test case {i} FAILED:")
                     logger.debug(
                         f"  Expected (type: {type(expected_val_from_yaml)}, keys: {list(expected_val_from_yaml.keys()) if isinstance(expected_val_from_yaml, dict) else 'N/A'}): {expected_val_from_yaml}")
                     logger.debug(
@@ -584,21 +584,21 @@ print(json.dumps(final_output, default=custom_json_serializer))
 
             elif actual_output_detail_json:  # status was not "success"
                 logger.debug(
-                    f"[_assess_correctness] Test case {i} had error in harness: {actual_output_detail_json.get('error_type')} - {actual_output_detail_json.get('error')}")
+                    f"[_check_correctness] Test case {i} had error in harness: {actual_output_detail_json.get('error_type')} - {actual_output_detail_json.get('error')}")
             else:  # No output detail found for this test case index
-                logger.debug(f"[_assess_correctness] Test case {i}: No output detail found in results.")
+                logger.debug(f"[_check_correctness] Test case {i}: No output detail found in results.")
 
         if total_tests == 0:
-            logger.debug("[_assess_correctness] No test cases to run, correctness is 1.0 by default.")
+            logger.debug("[_check_correctness] No test cases to run, correctness is 1.0 by default.")
             return 1.0, 0, 0  # Or perhaps 0.0 if no tests means it can't be verified? Your choice.
 
         correctness = passed_tests / total_tests
         logger.debug(
-            f"[_assess_correctness] Final assessment: Correctness={correctness:.2f} ({passed_tests}/{total_tests})")
+            f"[_check_correctness] Final assessment: Correctness={correctness:.2f} ({passed_tests}/{total_tests})")
         return correctness, passed_tests, total_tests
 
     # Method_v1.1.2 (ANSI escape code stripping for Radon output)
-    async def _run_static_analysis_tool(self, tool_name: str, command: List[str], program_id: str) -> \
+    async def _run_analysis(self, tool_name: str, command: List[str], program_id: str) -> \
             Tuple[Optional[Dict[str, Any]], Optional[str]]:
 
         logger.debug(f"Executing {tool_name} command for program {program_id}: {' '.join(command)}")
@@ -686,7 +686,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
             )
             return None, f"{tool_name}: Unspecified analysis error - {type(e).__name__}"
 
-    async def _invoke_llm_judge(self,
+    async def _get_ai_review(self,
                                 task: TaskDefinition,
                                 program_to_judge: Program,
                                 execution_summary_for_judge: Dict[str, Any]
@@ -696,12 +696,12 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 f"LLM Judge cannot be invoked for {program_to_judge.id}: Missing prompt_designer or code_generator_for_judge.")
             return None, "LLM Judge components not configured."
 
-        if not task.evaluation_guidelines_for_llm_judge:
+        if not task.ai_criteria:
             logger.info(
-                f"No evaluation_guidelines_for_llm_judge for task {task.id}. Skipping LLM Judge for {program_to_judge.id}.")
+                f"No ai_criteria for task {task.id}. Skipping LLM Judge for {program_to_judge.id}.")
             return None, "No user guidelines provided for LLM Judge."
 
-        judge_prompt = self.prompt_designer.design_llm_judge_prompt(
+        judge_prompt = self.prompt_designer.judge_prompt(
             task=task,
             program_to_judge=program_to_judge,
             execution_summary=execution_summary_for_judge
@@ -762,14 +762,14 @@ print(json.dumps(final_output, default=custom_json_serializer))
         logger.debug(f"[evaluate_program] Starting for Program ID: {program.id}, Task ID: {task.id}")
         program.status = "evaluating"
         program.errors = [] # Clear previous errors
-        program.llm_judge_feedback = None # Clear previous judge feedback
+        program.ai_feedback = None # Clear previous judge feedback
 
         default_scores = {
             "correctness": 0.0, "runtime_ms": float('inf'),
             "ruff_violations": float('inf'), "cyclomatic_complexity_avg": float('inf'),
             "maintainability_index": settings.DEFAULT_METRIC_VALUE.get("maintainability_index", -1.0),
             "passed_tests": 0.0,
-            "total_tests": float(len(task.input_output_examples) if task.input_output_examples else 0),
+            "total_tests": float(len(task.io_examples) if task.io_examples else 0),
             "runs_without_error": False,
             "standalone_script_runtime_ms": float('inf'),
             "llm_judge_overall_score": settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0) # NEW
@@ -837,7 +837,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 if needs_radon_cc:
                     logger.info(f"Running Radon CC analysis for program {program.id}...")
                     radon_cc_cmd = [sys.executable, "-m", "radon", "cc", "-j", temp_code_file_path]
-                    cc_data, cc_error = await self._run_static_analysis_tool("Radon CC", radon_cc_cmd, program.id)
+                    cc_data, cc_error = await self._run_analysis("Radon CC", radon_cc_cmd, program.id)
                     if cc_error:
                         program.errors.append(cc_error)
                         program.fitness_scores["cyclomatic_complexity_avg"] = float('inf')
@@ -872,7 +872,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 if needs_radon_mi:
                     logger.info(f"Running Radon MI analysis for program {program.id}...")
                     radon_mi_cmd = [sys.executable, "-m", "radon", "mi", "-j", temp_code_file_path]
-                    mi_data, mi_error = await self._run_static_analysis_tool("Radon MI", radon_mi_cmd, program.id)
+                    mi_data, mi_error = await self._run_analysis("Radon MI", radon_mi_cmd, program.id)
                     if mi_error:
                         program.errors.append(mi_error)
                         program.fitness_scores["maintainability_index"] = settings.DEFAULT_METRIC_VALUE.get(
@@ -902,14 +902,14 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 program.fitness_scores["maintainability_index"] = 100.0
 
             # 3. Standalone Script Execution Check (NEW - Blueprint Step 2)
-            # Heuristic: If target_solution_description exists and implies a script, try to run it.
+            # Heuristic: If target_solution exists and implies a script, try to run it.
             # A more robust way would be a dedicated flag in TaskDefinition, e.g., `is_executable_script: bool`.
-            # For now, let's assume we attempt this if `target_solution_description` is present.
-            should_attempt_standalone_run = bool(task.target_solution_description) and program.code.strip()
+            # For now, let's assume we attempt this if `target_solution` is present.
+            should_attempt_standalone_run = bool(task.target_solution) and program.code.strip()
 
             if should_attempt_standalone_run:
                 logger.info(f"[evaluate_program] Attempting standalone execution for {program.id} based on task configuration.")
-                runs_ok, script_stdout, script_stderr, script_exec_time_ms = await self._execute_standalone_script(
+                runs_ok, script_stdout, script_stderr, script_exec_time_ms = await self._ruin_script(
                     program_id=program.id,
                     code=program.code,
                     timeout_seconds=self.evaluation_timeout_seconds # Or a specific timeout for this step
@@ -932,17 +932,17 @@ print(json.dumps(final_output, default=custom_json_serializer))
             # 4. Functional Evaluation
             # This section should populate program.fitness_scores["correctness"], ["passed_tests"], ["runtime_ms"]
             # and add execution-related errors to program.errors
-            # The _execute_code_safely and _assess_correctness methods from your file seemed okay.
-            if task.input_output_examples:
+            # The _run_sandbox and _check_correctness methods from your file seemed okay.
+            if task.io_examples:
                 logger.debug(f"[evaluate_program] Starting functional evaluation for {program.id}...")
-                execution_results, execution_error_msg = await self._execute_code_safely(program.code,
+                execution_results, execution_error_msg = await self._run_sandbox(program.code,
                                                                                          task_for_examples=task)
                 if execution_error_msg:
                     program.errors.append(f"Execution Error: {execution_error_msg}")
                     program.fitness_scores["correctness"] = 0.0
                 elif execution_results and "test_outputs" in execution_results:
-                    correctness, passed_tests, total_tests = self._assess_correctness(execution_results,
-                                                                                      task.input_output_examples)
+                    correctness, passed_tests, total_tests = self._check_correctness(execution_results,
+                                                                                      task.io_examples)
                     program.fitness_scores["correctness"] = correctness
                     program.fitness_scores["passed_tests"] = float(passed_tests)
                     avg_runtime = execution_results.get("average_runtime_ms")
@@ -953,7 +953,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 else:  # Malformed execution results
                     program.errors.append("Execution Error: Unknown issue or malformed results from sandbox.")
                     program.fitness_scores["correctness"] = 0.0
-            elif task.improvement_mode == "task_focused" and not task.input_output_examples:  # No tests to run
+            elif task.improvement_mode == "task_focused" and not task.io_examples:  # No tests to run
                 program.errors.append("Evaluation: Task 'task_focused' but no I/O examples for correctness check.")
                 # Correctness remains default 0, or could be set to 1.0 if no tests means "not failed"
                 # Let's assume correctness 0 if it can't be verified for task_focused.
@@ -1008,13 +1008,13 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 }
                 # --- END REFINED logic ---
 
-                judge_score, judge_justification = await self._invoke_llm_judge(
+                judge_score, judge_justification = await self._get_ai_review(
                     task, program, current_exec_summary
                 )
                 if judge_score is not None:
                     program.fitness_scores["llm_judge_overall_score"] = judge_score
                 if judge_justification is not None:
-                    program.llm_judge_feedback = judge_justification
+                    program.ai_feedback = judge_justification
                 if judge_score is None and judge_justification: # If scoring failed but got some feedback
                     program.errors.append(f"LLM Judge Note: {judge_justification}")
 
@@ -1033,7 +1033,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
 
                 if critical_error_messages:  # Any execution crash, sandbox issue, etc.
                     program.status = "failed_evaluation_execution"
-                elif task.input_output_examples and current_correctness < 1.0:  # Failed functional tests
+                elif task.io_examples and current_correctness < 1.0:  # Failed functional tests
                     program.status = "failed_evaluation_tests"
                 else:  # No critical errors, and 100% correct (or no I/O tests for non-task_focused modes)
                     program.status = "evaluated"
@@ -1087,15 +1087,15 @@ print(json.dumps(final_output, default=custom_json_serializer))
             f"[execute wrapper] Called with program: {program_arg.id if program_arg else 'None'}, task: {task_arg.id if task_arg else 'None'}")
 
         if not isinstance(program_arg, Program):
-            err_msg = f"EvaluatorAgent.execute expects 'program' of type Program in kwargs, but got {type(program_arg)}."
+            err_msg = f"SolutionEvaluator.execute expects 'program' of type Program in kwargs, but got {type(program_arg)}."
             logger.error(err_msg)
             raise TypeError(err_msg)
 
         if not isinstance(task_arg, TaskDefinition):
-            err_msg = f"EvaluatorAgent.execute expects 'task' of type TaskDefinition in kwargs, but got {type(task_arg)}."
+            err_msg = f"SolutionEvaluator.execute expects 'task' of type TaskDefinition in kwargs, but got {type(task_arg)}."
             logger.error(err_msg)
             raise TypeError(err_msg)
 
         logger.debug(
-            f"EvaluatorAgent.execute is delegating to evaluate_program for program '{program_arg.id}', task '{task_arg.id}'")
+            f"SolutionEvaluator.execute is delegating to evaluate_program for program '{program_arg.id}', task '{task_arg.id}'")
         return await self.evaluate_program(program_arg, task_arg)

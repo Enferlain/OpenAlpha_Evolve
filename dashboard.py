@@ -22,33 +22,33 @@ def load_program_data(task_id_filter=None):  # Method_v1.3.0 (LLM Judge metrics)
 
     try:
         conn = sqlite3.connect(DB_PATH)
-        # Ensure llm_judge_feedback is selected if it's a column
+        # Ensure ai_feedback is selected if it's a column
         # If it's not a column yet because DB wasn't updated, this will fail gracefully or pandas will ignore.
         # For robustness, check if column exists or handle potential error.
-        # For now, assume SQLiteDatabaseAgent created it.
-        query = "SELECT id, generation, creation_method, parent_id, parent_ids, fitness_scores, errors, code, task_id, llm_judge_feedback FROM programs"  # ADDED llm_judge_feedback
+        # For now, assume SQLiteStore created it.
+        query = "SELECT id, generation, creation_method, parent_id, parent_ids, fitness_scores, errors, code, task_id, ai_feedback FROM programs"  # ADDED ai_feedback
         if task_id_filter:
             query += " WHERE task_id = ?"
             params = (task_id_filter,)
         else:
             params = ()
 
-        # Test if llm_judge_feedback column exists before trying to query it, to be more robust with older DBs
-        # For simplicity in this step, we'll assume the column exists due to SQLiteDatabaseAgent updates.
+        # Test if ai_feedback column exists before trying to query it, to be more robust with older DBs
+        # For simplicity in this step, we'll assume the column exists due to SQLiteStore updates.
         # A more robust version would query table_info first.
 
         df = pd.read_sql_query(query, conn, params=params if params else None)
 
     except sqlite3.OperationalError as e_op:
-        if "no such column: llm_judge_feedback" in str(e_op):
+        if "no such column: ai_feedback" in str(e_op):
             st.warning(
-                "Database column 'llm_judge_feedback' not found. Trying to load without it. Please ensure DB schema is updated.")
+                "Database column 'ai_feedback' not found. Trying to load without it. Please ensure DB schema is updated.")
             try:  # Fallback query without the new column
                 query_fallback = "SELECT id, generation, creation_method, parent_id, parent_ids, fitness_scores, errors, code, task_id FROM programs"
                 if task_id_filter:
                     query_fallback += " WHERE task_id = ?"
                 df = pd.read_sql_query(query_fallback, conn, params=params if params else None)
-                df['llm_judge_feedback'] = None  # Add the column as None
+                df['ai_feedback'] = None  # Add the column as None
             except Exception as e_fallback:
                 st.error(f"Error reading from database (fallback query failed): {e_fallback}")
                 if conn: conn.close()
@@ -70,7 +70,7 @@ def load_program_data(task_id_filter=None):  # Method_v1.3.0 (LLM Judge metrics)
         df['runtime_ms'] = pd.Series(dtype='float64')
         df['ruff_violations'] = pd.Series(dtype='float64')
         df['llm_judge_overall_score'] = pd.Series(dtype='float64')  # NEW
-        df['llm_judge_feedback'] = pd.Series(dtype='object')  # Ensure column exists
+        df['ai_feedback'] = pd.Series(dtype='object')  # Ensure column exists
         df['parent_ids_display'] = pd.Series(dtype='object')
         return df
 
@@ -101,9 +101,9 @@ def load_program_data(task_id_filter=None):  # Method_v1.3.0 (LLM Judge metrics)
         df['ruff_violations'] = float('inf')
         df['llm_judge_overall_score'] = 0.0  # NEW
 
-    # Ensure llm_judge_feedback column exists if not loaded by query (e.g. due to fallback)
-    if 'llm_judge_feedback' not in df.columns and not df.empty:
-        df['llm_judge_feedback'] = None  # Initialize if missing
+    # Ensure ai_feedback column exists if not loaded by query (e.g. due to fallback)
+    if 'ai_feedback' not in df.columns and not df.empty:
+        df['ai_feedback'] = None  # Initialize if missing
 
     if 'parent_ids' in df.columns and not df.empty:
         df['parent_ids_display'] = df['parent_ids'].apply(
@@ -196,8 +196,8 @@ if not run_metrics_df.empty:
         'avg_ruff_violations': 'Average Ruff Violations (Lower is Better)',
         'min_ruff_violations': 'Minimum Ruff Violations (Lower is Better)',
         # --- NEW: LLM Judge Score Plots ---
-        'avg_llm_judge_score': 'Average LLM Judge Score (/10)',  # Assuming MonitoringAgent logs this
-        'best_llm_judge_score': 'Best LLM Judge Score (/10)',  # Assuming MonitoringAgent logs this
+        'avg_llm_judge_score': 'Average LLM Judge Score (/10)',  # Assuming MetricsLogger logs this
+        'best_llm_judge_score': 'Best LLM Judge Score (/10)',  # Assuming MetricsLogger logs this
         # --- END NEW ---
         'llm_api_calls_generation': 'LLM API Calls per Gen'
     }
@@ -224,7 +224,7 @@ if not run_metrics_df.empty:
             col_idx += 1
     else:
         st.info(
-            "No plottable metrics found in run_metrics.jsonl. Ensure TaskManagerAgent and MonitoringAgent are logging them.")
+            "No plottable metrics found in run_metrics.jsonl. Ensure EvolveFlow and MetricsLogger are logging them.")
 
 # --- MODIFIED: Best Programs Table & Detail View (Blueprint Step 6) ---
 st.header("🏆 Top Evolved Programs")
@@ -303,7 +303,7 @@ if not programs_df.empty:
 
             # --- NEW: Display LLM Judge Score and Feedback ---
             judge_score = program_detail.get('llm_judge_overall_score', 'N/A')
-            judge_feedback_text = program_detail.get('llm_judge_feedback', 'No LLM judge feedback recorded.')
+            judge_feedback_text = program_detail.get('ai_feedback', 'No LLM judge feedback recorded.')
 
             st.metric("LLM Judge Overall Score", f"{judge_score}/10" if isinstance(judge_score, (
             int, float)) and judge_score != 0.0 else "N/A")  # Check if 0.0 was default for not found

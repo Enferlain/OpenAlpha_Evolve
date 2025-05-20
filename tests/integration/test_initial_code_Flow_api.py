@@ -2,8 +2,8 @@
 import pytest
 
 from core.interfaces import TaskDefinition
-from engine.prompting import PromptDesignerAgent
-from engine.generation import CodeGeneratorAgent
+from engine.prompting import PromptStudio
+from engine.generation import CodeProducer
 from config import settings
 
 
@@ -13,33 +13,33 @@ def simple_task_def_fixture_v1_0_0() -> TaskDefinition:
     return TaskDefinition(
         id="test_api_simple_add",
         description="Create a Python function `add_two(x, y)` that returns the sum of x and y.",
-        function_name_to_evolve="add_two",
-        input_output_examples=[{"input": [1, 2], "output": 3}],
+        evolve_function="add_two",
+        io_examples=[{"input": [1, 2], "output": 3}],
         allowed_imports=[]
     )
 
 
 @pytest.fixture
-def prompt_designer_fixture_v1_0_0(simple_task_def_fixture_v1_0_0: TaskDefinition) -> PromptDesignerAgent:
-    return PromptDesignerAgent(task_definition=simple_task_def_fixture_v1_0_0)
+def prompt_designer_fixture_v1_0_0(simple_task_def_fixture_v1_0_0: TaskDefinition) -> PromptStudio:
+    return PromptStudio(task_definition=simple_task_def_fixture_v1_0_0)
 
 
 @pytest.fixture
-def real_code_gen_agent_fixture_v1_0_0() -> CodeGeneratorAgent:
+def real_code_gen_agent_fixture_v1_0_0() -> CodeProducer:
     # IMPORTANT: Ensure GEMINI_API_KEY is *actually* set in your environment or .env file
     # for these tests to work! Pytest will pick it up via python-dotenv.
     if not settings.GEMINI_API_KEY or "NON-FUNCTIONAL" in settings.GEMINI_API_KEY or "NOT_FOUND" in settings.GEMINI_API_KEY:
         pytest.skip("GEMINI_API_KEY not configured for real API tests, skipping.")
     # You might want to explicitly use the Flash model for these tests in settings
     # or override it if the agent allows model selection per call.
-    return CodeGeneratorAgent()  # Assumes settings are configured for Gemini Flash
+    return CodeProducer()  # Assumes settings are configured for Gemini Flash
 
 
 @pytest.mark.llm_api  # Custom marker!
 @pytest.mark.asyncio
 async def test_initial_prompt_to_real_code_generation_v1_0_0(
-        prompt_designer_fixture_v1_0_0: PromptDesignerAgent,
-        real_code_gen_agent_fixture_v1_0_0: CodeGeneratorAgent,  # Using the 'real' agent
+        prompt_designer_fixture_v1_0_0: PromptStudio,
+        real_code_gen_agent_fixture_v1_0_0: CodeProducer,  # Using the 'real' agent
         simple_task_def_fixture_v1_0_0: TaskDefinition
 ):
     """
@@ -47,10 +47,10 @@ async def test_initial_prompt_to_real_code_generation_v1_0_0(
     This test is expected to be slower and potentially non-deterministic.
     """
     # 1. Arrange: Design the initial prompt
-    initial_prompt = prompt_designer_fixture_v1_0_0.design_initial_prompt(simple_task_def_fixture_v1_0_0)
+    initial_prompt = prompt_designer_fixture_v1_0_0.initial_prompt(simple_task_def_fixture_v1_0_0)
     assert "add_two" in initial_prompt
 
-    # 2. Act: Call the CodeGeneratorAgent's execute method - NO MOCKING HERE!
+    # 2. Act: Call the CodeProducer's execute method - NO MOCKING HERE!
     # This will make a real API call to Gemini.
     # We might want to add a small delay if we're running many such tests in sequence
     # to be kind to the API, though for a few tests it's usually fine.
@@ -73,7 +73,7 @@ async def test_initial_prompt_to_real_code_generation_v1_0_0(
     assert len(generated_output_code.strip()) > 0, "LLM returned empty code"
 
     # Check for essential elements rather than exact match
-    assert f"def {simple_task_def_fixture_v1_0_0.function_name_to_evolve}(" in generated_output_code, "Function definition not found"
+    assert f"def {simple_task_def_fixture_v1_0_0.evolve_function}(" in generated_output_code, "Function definition not found"
     assert "return" in generated_output_code.lower(), "'return' keyword not found"
 
     # Optional: Try to compile the generated code to see if it's valid Python

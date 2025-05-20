@@ -16,11 +16,11 @@ DB_FILE_PATH = settings.DATABASE_PATH if settings.DATABASE_PATH and settings.DAT
     ".db") else "alpha_evolve_programs.db"
 
 
-class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
+class SQLiteStore(DatabaseAgentInterface, BaseAgent):
     def __init__(self, db_file: Optional[str] = None):
         super().__init__()
         self.db_file = db_file if db_file else DB_FILE_PATH
-        logger.info(f"SQLiteDatabaseAgent initialized for database file: {self.db_file}. Call setup_db() to prepare.")
+        logger.info(f"SQLiteStore initialized for database file: {self.db_file}. Call setup_db() to prepare.")
 
     def _execute_blocking_query(self, query: str, params: tuple = (), fetch_one: bool = False, fetch_all: bool = False,
                                 commit: bool = False):
@@ -46,9 +46,9 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
             if conn:
                 conn.close()
 
-    # --- MODIFIED: _create_table_if_not_exists_async (Blueprint Step 6) ---
-    async def _create_table_if_not_exists_async(self) -> None:  # Method_v1.1.0
-        """Creates the 'programs' table if it doesn't exist, including llm_judge_feedback."""
+    # --- MODIFIED: _ensure_table (Blueprint Step 6) ---
+    async def _ensure_table(self) -> None:  # Method_v1.1.0
+        """Creates the 'programs' table if it doesn't exist, including ai_feedback."""
         logger.info(f"Ensuring 'programs' table exists in SQLite database: {self.db_file}")
         create_table_query = """
             CREATE TABLE IF NOT EXISTS programs (
@@ -62,7 +62,7 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
                 status TEXT NOT NULL,
                 task_id TEXT,
                 creation_method TEXT,
-                llm_judge_feedback TEXT  -- NEW COLUMN for LLM Judge's textual feedback
+                ai_feedback TEXT  -- NEW COLUMN for LLM Judge's textual feedback
             )
         """
         await asyncio.to_thread(
@@ -70,10 +70,10 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
             create_table_query,
             params=(), commit=True
         )
-        logger.info(f"'programs' table ensured (with llm_judge_feedback column) in {self.db_file}.")
+        logger.info(f"'programs' table ensured (with ai_feedback column) in {self.db_file}.")
 
     async def setup_db(self) -> None:
-        await self._create_table_if_not_exists_async()
+        await self._ensure_table()
 
     # --- MODIFIED: _program_from_row (Blueprint Step 6) ---
     def _program_from_row(self, row: sqlite3.Row) -> Optional[Program]:  # Method_v1.1.0
@@ -87,7 +87,7 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
             # Ensure all expected keys are present in the row object
             # This uses .get() with a default for the new column to be robust
             # if loading from an older DB schema that doesn't have it yet (though CREATE TABLE adds it).
-            llm_judge_feedback_value = row["llm_judge_feedback"] if "llm_judge_feedback" in row.keys() else None
+            ai_feedback_value = row["ai_feedback"] if "ai_feedback" in row.keys() else None
 
             return Program(
                 id=row["id"],
@@ -100,7 +100,7 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
                 status=row["status"],
                 task_id=row["task_id"],
                 creation_method=row["creation_method"] if "creation_method" in row.keys() else "unknown",
-                llm_judge_feedback=llm_judge_feedback_value  # NEW: Load the feedback
+                ai_feedback=ai_feedback_value  # NEW: Load the feedback
             )
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding JSON for program ID {row['id']} from {self.db_file}: {e}", exc_info=True)
@@ -127,13 +127,13 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
         errors_json = json.dumps(program.errors)
         parent_ids_json = json.dumps(program.parent_ids) if program.parent_ids is not None else None
 
-        # Ensure llm_judge_feedback is None if not set, not an empty string from Program default if that changed.
+        # Ensure ai_feedback is None if not set, not an empty string from Program default if that changed.
         # Program dataclass default is None, so this should be fine.
-        llm_judge_feedback_to_save = program.llm_judge_feedback
+        ai_feedback_to_save = program.ai_feedback
 
         save_query = """
             INSERT OR REPLACE INTO programs 
-            (id, code, fitness_scores, generation, parent_id, parent_ids, errors, status, task_id, creation_method, llm_judge_feedback)
+            (id, code, fitness_scores, generation, parent_id, parent_ids, errors, status, task_id, creation_method, ai_feedback)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         params = (
@@ -147,7 +147,7 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
             program.status,
             program.task_id,
             program.creation_method,
-            llm_judge_feedback_to_save  # NEW: Save the feedback
+            ai_feedback_to_save  # NEW: Save the feedback
         )
         await asyncio.to_thread(
             self._execute_blocking_query,
@@ -158,7 +158,7 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
 
     # --- get_program, get_all_programs, get_best_programs, get_programs_for_next_generation, count_programs, clear_database, execute ---
     # These methods do not need to change for this specific update, as they rely on _program_from_row
-    # or operate on all columns / don't directly interact with llm_judge_feedback beyond what _program_from_row provides.
+    # or operate on all columns / don't directly interact with ai_feedback beyond what _program_from_row provides.
     # (The existing implementations of these methods will be used)
 
     async def get_program(self, program_id: str) -> Optional[Program]:
@@ -167,7 +167,7 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
         row = await asyncio.to_thread(
             self._execute_blocking_query, query, (program_id,), fetch_one=True
         )
-        program = self._program_from_row(row)  # Will now include llm_judge_feedback
+        program = self._program_from_row(row)  # Will now include ai_feedback
         if program:
             logger.info(f"Retrieved program ID: {program.id} from SQLite: {self.db_file}")
         else:
@@ -270,6 +270,6 @@ class SQLiteDatabaseAgent(DatabaseAgentInterface, BaseAgent):
 
     async def execute(self, *args, **kwargs) -> Any:
         logger.error(
-            "SQLiteDatabaseAgent.execute() is not implemented. Use specific methods like save_program, get_program etc.")
+            "SQLiteStore.execute() is not implemented. Use specific methods like save_program, get_program etc.")
         raise NotImplementedError(
-            "SQLiteDatabaseAgent does not have a generic execute method. Please use specific database operations.")
+            "SQLiteStore does not have a generic execute method. Please use specific database operations.")

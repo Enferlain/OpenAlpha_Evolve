@@ -8,18 +8,18 @@ import time
 from typing import List, Dict, Any, Optional, Union
 
 from core.interfaces import (
-    TaskManagerInterface, TaskDefinition, Program, PromptDesignerInterface, CodeGeneratorInterface, EvaluatorAgentInterface,
+    TaskManagerInterface, TaskDefinition, Program, PromptDesignerInterface, CodeGeneratorInterface, SolutionEvaluatorInterface,
     DatabaseAgentInterface, SelectionControllerInterface,
-    MonitoringAgentInterface
+    MetricsLoggerInterface
 )
 from config import settings
-from engine.prompting import PromptDesignerAgent
-from engine.generation import CodeGeneratorAgent
-# Ensure EvaluatorAgent is imported if its type hint is used, or adjust if only interface used.
-from engine.evaluation import EvaluatorAgent
-from flow.database_sqlite import SQLiteDatabaseAgent
-from flow.selection import SelectionControllerAgent
-from flow.monitoring import MonitoringAgent
+from engine.prompting import PromptStudio
+from engine.generation import CodeProducer
+# Ensure SolutionEvaluator is imported if its type hint is used, or adjust if only interface used.
+from engine.evaluation import SolutionEvaluator
+from flow.database_sqlite import SQLiteStore
+from flow.selection import EvoSelector
+from flow.monitoring import MetricsLogger
 
 logger = logging.getLogger(__name__)
 
@@ -38,25 +38,25 @@ logger.info(
 )
 
 
-class TaskManagerAgent(TaskManagerInterface):
+class EvolveFlow(TaskManagerInterface):
     def __init__(self, task_definition: TaskDefinition, config: Optional[Dict[str, Any]] = None):
         super().__init__(config)
         self.task_definition = task_definition
 
-        # Initialize agents, ensuring EvaluatorAgent gets PromptDesigner and CodeGenerator for judge calls
-        self.prompt_designer: PromptDesignerInterface = PromptDesignerAgent(task_definition=self.task_definition)
-        self.code_generator: CodeGeneratorInterface = CodeGeneratorAgent()
+        # Initialize agents, ensuring SolutionEvaluator gets PromptDesigner and CodeGenerator for judge calls
+        self.prompt_designer: PromptDesignerInterface = PromptStudio(task_definition=self.task_definition)
+        self.code_generator: CodeGeneratorInterface = CodeProducer()
 
-        # Pass the necessary agents to EvaluatorAgent for LLM-as-Judge
-        self.evaluator: EvaluatorAgentInterface = EvaluatorAgent(
+        # Pass the necessary agents to SolutionEvaluator for LLM-as-Judge
+        self.evaluator: SolutionEvaluatorInterface = SolutionEvaluator(
             task_definition=self.task_definition,
             prompt_designer=self.prompt_designer,  # For designing judge prompts
             code_generator_for_judge=self.code_generator  # For making the call to the judge LLM
         )
 
-        self.database: DatabaseAgentInterface = SQLiteDatabaseAgent()
-        self.selection_controller: SelectionControllerInterface = SelectionControllerAgent()
-        self.monitoring_agent: MonitoringAgentInterface = MonitoringAgent()
+        self.database: DatabaseAgentInterface = SQLiteStore()
+        self.selection_controller: SelectionControllerInterface = EvoSelector()
+        self.monitoring_agent: MetricsLoggerInterface = MetricsLogger()
 
         self.crossover_rate = settings.CROSSOVER_RATE
         self.min_parents_for_crossover = 2
@@ -74,29 +74,29 @@ class TaskManagerAgent(TaskManagerInterface):
 
         self.start_time_overall_run: Optional[float] = None
 
-    async def initialize_population(self) -> List[Program]:  # Method_v2.1.1 (Using initial_seed_code_or_ideas)
+    async def initialize_population(self) -> List[Program]:  # Method_v2.1.1 (Using initial_seed)
         logger.info(
             f"Initializing population for task: {self.task_definition.id} (Mode: {self.task_definition.improvement_mode})")
         initial_population = []
         programs_to_generate_from_prompt = self.population_size
         start_index_for_prompt_generation = 0
 
-        # --- CORRECTED to use initial_seed_code_or_ideas ---
-        if self.task_definition.initial_seed_code_or_ideas and \
+        # --- CORRECTED to use initial_seed ---
+        if self.task_definition.initial_seed and \
                 self.task_definition.improvement_mode == "general_refinement":
-            logger.info(f"Using provided 'initial_seed_code_or_ideas' for the first program.")
+            logger.info(f"Using provided 'initial_seed' for the first program.")
             program_id = f"{self.task_definition.id}_gen0_seed_prog0"
 
             # If it's just "ideas" (text), it might not be valid code directly.
             # For now, we'll assume if it's provided, it's intended as the 'code' field.
-            # The PromptDesignerAgent for initial prompt also uses this field.
+            # The PromptStudio for initial prompt also uses this field.
             # If it's ideas, the initial program might fail syntax but that's okay,
             # as it's a seed for refinement.
-            seed_content = self.task_definition.initial_seed_code_or_ideas
+            seed_content = self.task_definition.initial_seed
 
             seed_program = Program(
                 id=program_id,
-                code=seed_content if seed_content else "# Empty seed provided via initial_seed_code_or_ideas",
+                code=seed_content if seed_content else "# Empty seed provided via initial_seed",
                 generation=0,
                 status="unevaluated",  # Will be evaluated
                 task_id=self.task_definition.id,
@@ -108,15 +108,15 @@ class TaskManagerAgent(TaskManagerInterface):
             logger.info(f"Will generate {programs_to_generate_from_prompt} additional programs using initial prompt.")
 
         if programs_to_generate_from_prompt > 0:
-            # --- CORRECTED to use initial_seed_code_or_ideas ---
+            # --- CORRECTED to use initial_seed ---
             if self.task_definition.improvement_mode == "general_refinement" and \
-                    not self.task_definition.initial_seed_code_or_ideas:
+                    not self.task_definition.initial_seed:
                 logger.warning(
-                    f"Task mode is 'general_refinement' but no 'initial_seed_code_or_ideas' was provided. "
+                    f"Task mode is 'general_refinement' but no 'initial_seed' was provided. "
                     f"Proceeding with standard initial prompt for task '{self.task_definition.id}'.")
 
-            # The PromptDesignerAgent's design_initial_prompt is already updated to use initial_seed_code_or_ideas
-            initial_prompt_text = self.prompt_designer.design_initial_prompt(self.task_definition)
+            # The PromptStudio's initial_prompt is already updated to use initial_seed
+            initial_prompt_text = self.prompt_designer.initial_prompt(self.task_definition)
 
             # Safety check if prompt is empty (PromptDesigner should handle this, but defense in depth)
             if not initial_prompt_text.strip():
@@ -160,7 +160,7 @@ class TaskManagerAgent(TaskManagerInterface):
     def _calculate_population_metrics(self, population: List[Program]) -> Dict[str, Any]: # Method_v1.2.0
         """Calculates summary statistics for a population, including LLM Judge scores."""
         if not population:
-            return { # Return defaults for all expected metrics by MonitoringAgent
+            return { # Return defaults for all expected metrics by MetricsLogger
                 "avg_correctness": 0.0, "best_correctness": 0.0,
                 "avg_ruff_violations": float('inf'), "min_ruff_violations": float('inf'),
                 "avg_llm_judge_score": settings.DEFAULT_METRIC_VALUE.get("llm_judge_overall_score", 0.0), # NEW
@@ -274,7 +274,7 @@ class TaskManagerAgent(TaskManagerInterface):
                 # This case means evaluate_program returned something unexpected (like None)
                 # that wasn't an exception. This is the problem area.
                 logger.error(
-                    f"EvaluatorAgent.evaluate_program for program {program_being_processed.id} returned an unexpected type: {type(gather_result)}. Value: {gather_result}. Marking as failed.")
+                    f"SolutionEvaluator.evaluate_program for program {program_being_processed.id} returned an unexpected type: {type(gather_result)}. Value: {gather_result}. Marking as failed.")
                 program_being_processed.status = "failed_evaluation_internal"  # A distinct status
                 program_being_processed.errors.append(f"Evaluator returned unexpected type: {type(gather_result)}")
                 newly_evaluated_or_failed_programs.append(
@@ -305,12 +305,12 @@ class TaskManagerAgent(TaskManagerInterface):
         logger.info(f"Finished evaluating. Total programs processed/retained: {len(final_evaluated_population)}.")
         return final_evaluated_population
 
-    async def manage_evolutionary_cycle(self) -> List[Program]:  # Method_v6.1 (minor logging for total API calls)
+    async def run_evolution(self) -> List[Program]:  # Method_v6.1 (minor logging for total API calls)
         logger.info(
             f"Starting evolutionary cycle for task: {self.task_definition.id} (Mode: {self.task_definition.improvement_mode})")
         self.start_time_overall_run = time.monotonic()
 
-        if isinstance(self.database, SQLiteDatabaseAgent):
+        if isinstance(self.database, SQLiteStore):
             await self.database.setup_db()
 
         current_population = await self.initialize_population()
@@ -322,7 +322,7 @@ class TaskManagerAgent(TaskManagerInterface):
                 self.code_generator.reset_api_call_count_generation()
             logger.info(f"--- Generation {gen}/{self.num_generations} ---")
 
-            parents = self.selection_controller.select_parents(current_population, self.num_parents_to_select,
+            parents = self.selection_controller.get_parents(current_population, self.num_parents_to_select,
                                                                self.task_definition)
             if not parents:
                 logger.warning(f"Generation {gen}: No parents selected. Ending evolution early.")
@@ -358,7 +358,7 @@ class TaskManagerAgent(TaskManagerInterface):
             if offspring_population:
                 offspring_population = await self.evaluate_population(offspring_population)
 
-            current_population = self.selection_controller.select_survivors(current_population, offspring_population,
+            current_population = self.selection_controller.get_survivors(current_population, offspring_population,
                                                                             self.population_size, self.task_definition)
 
             # Log best program of this generation
@@ -389,14 +389,14 @@ class TaskManagerAgent(TaskManagerInterface):
         total_api_calls_session = self.code_generator.get_api_call_count_session() if hasattr(self.code_generator,
                                                                                               'get_api_call_count_session') else 0
 
-        best_program_list = await self._get_overall_best_program()
+        best_program_list = await self._get_best_program()
         best_overall_program_obj = best_program_list[0] if best_program_list else None
 
         final_summary_payload = {
             "best_program_overall": best_overall_program_obj, "total_runtime_sec": round(total_run_time_sec, 2),
             "task_id": self.task_definition.id, "total_llm_api_calls_session": total_api_calls_session
         }
-        await self.monitoring_agent.execute("log_final_summary", payload=final_summary_payload)
+        await self.monitoring_agent.execute("log_run_summary", payload=final_summary_payload)
         return best_program_list
 
     async def generate_crossover_offspring(self, parent1: Program, parent2: Program, generation_num: int,
@@ -404,7 +404,7 @@ class TaskManagerAgent(TaskManagerInterface):
         logger.debug(
             f"Generating crossover offspring {child_id} from parents {parent1.id} & {parent2.id} for gen {generation_num}")
 
-        crossover_prompt = self.prompt_designer.design_crossover_prompt(self.task_definition, parent1, parent2)
+        crossover_prompt = self.prompt_designer.crossover_prompt(self.task_definition, parent1, parent2)
 
         # For crossover, we expect a full new code block
         generated_code = await self.code_generator.generate_code(  # Use generate_code directly
@@ -437,14 +437,14 @@ class TaskManagerAgent(TaskManagerInterface):
     async def generate_offspring(self, parent: Program, generation_num: int, child_id: str) -> Optional[
         Program]:  # Method_v4.2 (Corrected bug_fix_prompt call)
         logger.debug(f"Generating mutation/bug_fix offspring {child_id} from parent {parent.id}")
-        ancestral_summary = await self._get_ancestral_summary_for_llm(parent, max_depth=3)
+        ancestral_summary = await self._get_ancestral_summary(parent, max_depth=3)
 
         mutation_prompt_str: str = ""
         prompt_type: str = "mutation"
         original_attempt_summary_for_fallback = ""
 
         # Decide if bug_fix or mutation based on status and errors
-        # The PromptDesignerAgent.design_bug_fix_prompt will internally look at program.status and program.errors
+        # The PromptStudio.bugfix_prompt will internally look at program.status and program.errors
         # to determine the "Primary Problem".
 
         # Heuristic: If status indicates a clear failure (not just failed I/O tests but execution/syntax)
@@ -453,11 +453,11 @@ class TaskManagerAgent(TaskManagerInterface):
                                                        "failed_evaluation_internal_critical"]
         is_very_low_judge_score = parent.fitness_scores.get('llm_judge_overall_score', 10) <= 3  # Example threshold
 
-        if is_critical_failure_status or (parent.llm_judge_feedback and is_very_low_judge_score):
+        if is_critical_failure_status or (parent.ai_feedback and is_very_low_judge_score):
             logger.info(
                 f"Attempting bug-fix prompt for {parent.id} due to status '{parent.status}' or low judge score.")
             # --- CORRECTED CALL: Removed error_message and execution_output ---
-            mutation_prompt_str = self.prompt_designer.design_bug_fix_prompt(
+            mutation_prompt_str = self.prompt_designer.bugfix_prompt(
                 task=self.task_definition,
                 program=parent,  # PromptDesigner will get error context from here
                 ancestral_summary=ancestral_summary
@@ -469,7 +469,7 @@ class TaskManagerAgent(TaskManagerInterface):
             original_attempt_summary_for_fallback = f"Fix critical issue (e.g., '{primary_error_display[:50]}...') for task: {self.task_definition.description}"
         else:
             logger.info(f"Attempting mutation prompt for {parent.id}.")
-            mutation_prompt_str = self.prompt_designer.design_mutation_prompt(
+            mutation_prompt_str = self.prompt_designer.mutation_prompt(
                 task=self.task_definition,
                 parent_program=parent,
                 ancestral_summary=ancestral_summary
@@ -500,11 +500,11 @@ class TaskManagerAgent(TaskManagerInterface):
 
         # Check if the output is actually a diff or if it's already full code (e.g. LLM ignored diff request)
         # or if the diff application failed or resulted in no change.
-        # The CodeGeneratorAgent's execute method with output_format="diff" returns the *applied* code.
+        # The CodeProducer's execute method with output_format="diff" returns the *applied* code.
         # If it couldn't apply or diff was bad, it might return original or raw diff.
         # Let's simplify: if the result from a diff request is same as parent or empty, or still looks like a diff, try fallback.
 
-        # The CodeGeneratorAgent's execute for "diff" already tries to apply it.
+        # The CodeProducer's execute for "diff" already tries to apply it.
         # If it returns the parent code, it means the diff failed or was empty.
         if not temp_generated_output.strip() or temp_generated_output == parent.code:
             logger.warning(
@@ -512,7 +512,7 @@ class TaskManagerAgent(TaskManagerInterface):
             prompt_type_original = prompt_type
             prompt_type += "_fallback_full"  # Mark that fallback was used
 
-            fallback_prompt = self.prompt_designer.design_failed_diff_fallback_prompt(
+            fallback_prompt = self.prompt_designer.diff_fallback_prompt(
                 task=self.task_definition, original_program=parent,
                 previous_attempt_summary=original_attempt_summary_for_fallback,
                 # Pass summary of what we tried to fix/improve
@@ -533,7 +533,7 @@ class TaskManagerAgent(TaskManagerInterface):
                 logger.warning(
                     f"Fallback full code generation for {child_id} ({prompt_type_original}) also empty or no change. Skipping offspring generation.")
                 return None
-        else:  # Diff was presumably successful and applied by CodeGeneratorAgent.execute
+        else:  # Diff was presumably successful and applied by CodeProducer.execute
             final_code = temp_generated_output
 
         offspring = Program(id=child_id, code=final_code, generation=generation_num, parent_id=parent.id,
@@ -541,7 +541,7 @@ class TaskManagerAgent(TaskManagerInterface):
                             task_id=self.task_definition.id, creation_method=prompt_type)
         return offspring
 
-    async def _get_overall_best_program(self) -> List[Program]:  # Helper method extracted
+    async def _get_best_program(self) -> List[Program]:  # Helper method extracted
         logger.info("Fetching overall best program from database...")
         all_evaluated_programs = await self.database.get_all_programs()
 
@@ -565,8 +565,8 @@ class TaskManagerAgent(TaskManagerInterface):
         # logger.info(f"Code:\n{best_overall_program.code}")
         return [best_overall_program]
 
-    # --- MODIFIED: _get_ancestral_summary_for_llm (v1.1.0 for Ruff) ---
-    async def _get_ancestral_summary_for_llm(self, program: Program, max_depth: int = 3) -> List[
+    # --- MODIFIED: _get_ancestral_summary (v1.1.0 for Ruff) ---
+    async def _get_ancestral_summary(self, program: Program, max_depth: int = 3) -> List[
         Dict[str, Any]]:  # Method_v1.1.0
         """
         Retrieves a concise summary of a program's recent ancestors for LLM prompting.
@@ -624,4 +624,4 @@ class TaskManagerAgent(TaskManagerInterface):
         return list(reversed(history_summary))
 
     async def execute(self) -> Any:  # Unchanged
-        return await self.manage_evolutionary_cycle()
+        return await self.run_evolution()

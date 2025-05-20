@@ -3,8 +3,8 @@ import pytest
 from unittest.mock import AsyncMock  # For mocking async methods!
 
 from core.interfaces import TaskDefinition
-from engine.prompting import PromptDesignerAgent
-from engine.generation import CodeGeneratorAgent
+from engine.prompting import PromptStudio
+from engine.generation import CodeProducer
 from config import settings  # To potentially mock settings values
 
 
@@ -15,46 +15,46 @@ def simple_task_def_fixture_v1_0_0() -> TaskDefinition:
     return TaskDefinition(
         id="test_simple_add",
         description="Create a Python function that adds two numbers.",
-        function_name_to_evolve="add_numbers",
-        input_output_examples=[{"input": [1, 2], "output": 3}],
+        evolve_function="add_numbers",
+        io_examples=[{"input": [1, 2], "output": 3}],
         allowed_imports=["math"]  # Just an example
     )
 
 
-# A fixture for PromptDesignerAgent
+# A fixture for PromptStudio
 @pytest.fixture
-def prompt_designer_fixture_v1_0_0(simple_task_def_fixture_v1_0_0: TaskDefinition) -> PromptDesignerAgent:
-    """Provides a PromptDesignerAgent instance."""
-    return PromptDesignerAgent(task_definition=simple_task_def_fixture_v1_0_0)
+def prompt_designer_fixture_v1_0_0(simple_task_def_fixture_v1_0_0: TaskDefinition) -> PromptStudio:
+    """Provides a PromptStudio instance."""
+    return PromptStudio(task_definition=simple_task_def_fixture_v1_0_0)
 
 
-# A fixture for CodeGeneratorAgent (can reuse from unit tests if structured well)
+# A fixture for CodeProducer (can reuse from unit tests if structured well)
 @pytest.fixture
-def code_gen_agent_fixture_v1_0_0(mocker) -> CodeGeneratorAgent:  # mocker is from pytest-mock
-    """Provides a CodeGeneratorAgent instance with GEMINI_API_KEY mocked."""
+def code_gen_agent_fixture_v1_0_0(mocker) -> CodeProducer:  # mocker is from pytest-mock
+    """Provides a CodeProducer instance with GEMINI_API_KEY mocked."""
     mocker.patch.object(settings, 'GEMINI_API_KEY', "DUMMY_KEY_FOR_TESTING_INTEGRATION")
-    # If other settings are crucial for CodeGeneratorAgent init, mock them too
+    # If other settings are crucial for CodeProducer init, mock them too
     # mocker.patch.object(settings, 'GEMINI_PRO_MODEL_NAME', "dummy-model-integration")
-    return CodeGeneratorAgent()
+    return CodeProducer()
 
 
 @pytest.mark.asyncio  # Pytest needs this for async test functions!
 async def test_initial_prompt_to_code_generation_v1_0_0(
-        prompt_designer_fixture_v1_0_0: PromptDesignerAgent,
-        code_gen_agent_fixture_v1_0_0: CodeGeneratorAgent,
+        prompt_designer_fixture_v1_0_0: PromptStudio,
+        code_gen_agent_fixture_v1_0_0: CodeProducer,
         simple_task_def_fixture_v1_0_0: TaskDefinition,
-        mocker  # For mocking the LLM call within CodeGeneratorAgent
+        mocker  # For mocking the LLM call within CodeProducer
 ):
     """
     Test that an initial prompt leads to code generation,
     mocking the actual LLM call.
     """
     # 1. Arrange: Design the initial prompt
-    initial_prompt = prompt_designer_fixture_v1_0_0.design_initial_prompt(simple_task_def_fixture_v1_0_0)
+    initial_prompt = prompt_designer_fixture_v1_0_0.initial_prompt(simple_task_def_fixture_v1_0_0)
     assert "add_numbers" in initial_prompt  # Quick check the prompt is reasonable
     assert "adds two numbers" in initial_prompt
 
-    # 2. Arrange: Mock the LLM's response from CodeGeneratorAgent's generate_code method
+    # 2. Arrange: Mock the LLM's response from CodeProducer's generate_code method
     # This is the magic part! We're telling generate_code what to return without calling Gemini!
     mocked_llm_response_code = "def add_numbers(a, b):\n  return a + b"
 
@@ -66,7 +66,7 @@ async def test_initial_prompt_to_code_generation_v1_0_0(
     # So, we find the `generate_content_async` method of the model object it creates.
 
     # Simpler: Let's mock the generate_code method of the instance itself for this integration test's purpose.
-    # If generate_code calls other internal methods we want to test (like _clean_llm_output),
+    # If generate_code calls other internal methods we want to test (like _clean_output),
     # we should mock the *actual API call inside* generate_code.
 
     # Let's assume generate_code calls an internal _call_llm_api_async method (hypothetical)
@@ -75,7 +75,7 @@ async def test_initial_prompt_to_code_generation_v1_0_0(
 
     # To mock the `generate_content_async` call inside `code_gen_agent_fixture_v1_0_0.generate_code`:
     # We'd need to know how `model_to_use` is obtained. Since it's created inside,
-    # it's easier to mock `CodeGeneratorAgent.generate_code` itself if we only care about its final output for this integration test.
+    # it's easier to mock `CodeProducer.generate_code` itself if we only care about its final output for this integration test.
     # Or, if `execute` calls `generate_code`, we mock `generate_code`.
 
     # Let's mock `code_gen_agent_fixture_v1_0_0.generate_code` directly for this example
@@ -83,7 +83,7 @@ async def test_initial_prompt_to_code_generation_v1_0_0(
     mock_generate_code_method = AsyncMock(return_value=mocked_llm_response_code)
     mocker.patch.object(code_gen_agent_fixture_v1_0_0, 'generate_code', new=mock_generate_code_method)
 
-    # 3. Act: Call the CodeGeneratorAgent's execute method
+    # 3. Act: Call the CodeProducer's execute method
     # (which internally would call the now-mocked generate_code)
     generated_output = await code_gen_agent_fixture_v1_0_0.execute(
         prompt=initial_prompt,

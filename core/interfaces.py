@@ -20,10 +20,10 @@ class Program:
     creation_method: str = "unknown"
 
     # --- NEW Field for LLM Judge Textual Feedback (Blueprint Requirement) ---
-    llm_judge_feedback: Optional[str] = field(default=None)
+    ai_feedback: Optional[str] = field(default=None)
     """Qualitative textual feedback from the LLM-as-a-judge."""
 
-    # Note for EvaluatorAgent:
+    # Note for SolutionEvaluator:
     # - `fitness_scores` will store 'llm_judge_overall_score', 'llm_judge_creativity_score' (and others from LLM judge)
     # - `fitness_scores` will also store 'runs_without_error' (bool, or 1.0/0.0 if strictly float needed for sorting keys)
     # - `fitness_scores` continues to store 'ruff_violations', 'runtime_ms', 'correctness' (if applicable), etc.
@@ -35,44 +35,44 @@ class TaskDefinition:
     description: str # Rich, high-level problem/goal statement
 
     # --- Optional Inputs (Blueprint Requirements & Enhancements) ---
-    initial_seed_code_or_ideas: Optional[str] = None # RENAMED from initial_seed_code, broader scope
+    initial_seed: Optional[str] = None # RENAMED from initial_seed_code, broader scope
     """A starting point, could be code, pseudocode, or even a list of concepts/ideas."""
 
-    evaluation_guidelines_for_llm_judge: Optional[str] = None # NEW
+    ai_criteria: Optional[str] = None # NEW
     """Natural language criteria for an LLM to assess the solution's quality, effectiveness, creativity, etc."""
 
-    sample_data_paths_or_env_description: Optional[str] = None # NEW
+    run_context: Optional[str] = None # NEW
     """For tasks needing external data or a (mocked) interaction context (e.g., file paths, environment setup notes)."""
 
     suggested_imports: Optional[List[str]] = None # NEW (distinct from strictly enforced allowed_imports)
     """Optional hints for the LLM regarding useful Python libraries, not hard constraints."""
 
-    target_solution_description: Optional[str] = None # NEW (replaces/generalizes function_name_to_evolve)
+    target_solution: Optional[str] = None # NEW (replaces/generalizes evolve_function)
     """Describes what the final output should be (e.g., 'a Python script that...', 'a Python module containing class X')."""
 
     # --- Fields that become more "optional" or "hints" rather than strict constraints ---
-    function_name_to_evolve: Optional[str] = None # Now more of a hint if target_solution_description is primary
-    input_output_examples: Optional[List[Dict[str, Any]]] = None # Can be part of sample_data_paths or LLM judge's role
+    evolve_function: Optional[str] = None # Now more of a hint if target_solution is primary
+    io_examples: Optional[List[Dict[str, Any]]] = None # Can be part of sample_data_paths or LLM judge's role
     allowed_imports: Optional[List[str]] = None # Becomes less strict, more like strong suggestions if suggested_imports is also used
 
     # --- Existing fields for general refinement / specific focus ---
-    initial_code_prompt: Optional[str] = "Provide an initial Python solution for the following problem:" # Default prompt
+    initial_prompt_override: Optional[str] = "Provide an initial Python solution for the following problem:" # Default prompt
 
     improvement_mode: Literal["task_focused", "general_refinement"] = "task_focused"
     """
-    'task_focused': The agent focuses on the problem description and target_solution_description.
-    'general_refinement': The agent focuses on improving 'initial_seed_code_or_ideas' based on general metrics
-                          and 'specific_improvement_directives', potentially using I/O examples/LLM judge for regression/quality.
+    'task_focused': The agent focuses on the problem description and target_solution.
+    'general_refinement': The agent focuses on improving 'initial_seed' based on general metrics
+                          and 'refine_goals', potentially using I/O examples/LLM judge for regression/quality.
     """
 
     primary_focus_metrics: Optional[List[str]] = None
     """
     For 'general_refinement' or even 'task_focused' mode, list of metrics the LLM should primarily focus on improving
     (e.g., ["llm_judge_overall_score", "ruff_violations", "cyclomatic_complexity", "runtime_ms"]).
-    This will be used by the EvaluatorAgent and PromptDesignerAgent.
+    This will be used by the SolutionEvaluator and PromptStudio.
     """
 
-    specific_improvement_directives: Optional[str] = None
+    refine_goals: Optional[str] = None
     """
     Natural language instructions, e.g., 'Focus on reducing runtime of the main loop.' or 'Refactor for better readability.'
     """
@@ -96,17 +96,17 @@ class BaseAgent(ABC):
 
 class TaskManagerInterface(BaseAgent):
     @abstractmethod
-    async def manage_evolutionary_cycle(self):
+    async def run_evolution(self):
         pass
 
 
 class PromptDesignerInterface(BaseAgent):
     @abstractmethod
-    def design_initial_prompt(self, task: TaskDefinition) -> str:
+    def initial_prompt(self, task: TaskDefinition) -> str:
         pass
 
     @abstractmethod
-    def design_mutation_prompt(self,
+    def mutation_prompt(self,
                                task: TaskDefinition,
                                parent_program: Program, # Main source of feedback
                                ancestral_summary: Optional[List[Dict[str, Any]]] = None
@@ -114,12 +114,12 @@ class PromptDesignerInterface(BaseAgent):
         pass
 
     @abstractmethod
-    def design_crossover_prompt(self, task: TaskDefinition, parent_program1: Program, parent_program2: Program) -> str:
+    def crossover_prompt(self, task: TaskDefinition, parent_program1: Program, parent_program2: Program) -> str:
         """Designs a prompt to guide the LLM in combining two parent programs."""
         pass
 
     @abstractmethod
-    def design_bug_fix_prompt(self,
+    def bugfix_prompt(self,
                               task: TaskDefinition,
                               program: Program, # Main source of error/feedback context
                               ancestral_summary: Optional[List[Dict[str, Any]]] = None
@@ -127,14 +127,14 @@ class PromptDesignerInterface(BaseAgent):
         pass
 
     @abstractmethod
-    def design_failed_diff_fallback_prompt(self, task: TaskDefinition, original_program: Program,
+    def diff_fallback_prompt(self, task: TaskDefinition, original_program: Program,
                                            previous_attempt_summary: str,
                                            ancestral_summary: Optional[List[Dict[str, Any]]] = None) -> str:
         """Designs a prompt to ask for full code after a diff attempt failed."""
         pass
 
     @abstractmethod # NEW Method for LLM Judge Prompt
-    def design_llm_judge_prompt(self,
+    def judge_prompt(self,
                                 task: TaskDefinition,
                                 program_to_judge: Program,
                                 execution_summary: Dict[str, Any] # Contains info like runs_ok, stdout, stderr, ruff_summary
@@ -149,7 +149,7 @@ class CodeGeneratorInterface(BaseAgent):
         pass
 
 
-class EvaluatorAgentInterface(BaseAgent):
+class SolutionEvaluatorInterface(BaseAgent):
     @abstractmethod
     async def evaluate_program(self, program: Program, task: TaskDefinition) -> Program:
         pass
@@ -179,11 +179,11 @@ class DatabaseAgentInterface(BaseAgent):
 
 class SelectionControllerInterface(BaseAgent):
     @abstractmethod
-    def select_parents(self, evaluated_programs: List[Program], num_parents: int, task: TaskDefinition) -> List[Program]:
+    def get_parents(self, evaluated_programs: List[Program], num_parents: int, task: TaskDefinition) -> List[Program]:
         pass
 
     @abstractmethod
-    def select_survivors(self, current_population: List[Program], offspring_population: List[Program], population_size: int, task: TaskDefinition) -> List[Program]:
+    def get_survivors(self, current_population: List[Program], offspring_population: List[Program], population_size: int, task: TaskDefinition) -> List[Program]:
         pass
 
     @abstractmethod
@@ -197,7 +197,7 @@ class RLFineTunerInterface(BaseAgent):
         pass
 
 
-class MonitoringAgentInterface(BaseAgent):
+class MetricsLoggerInterface(BaseAgent):
     @abstractmethod
     async def log_metrics(self, metrics: Dict): # This will be called by log_generation_metrics or directly if needed
         pass

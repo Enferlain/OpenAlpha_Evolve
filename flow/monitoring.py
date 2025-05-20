@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
-from core.interfaces import MonitoringAgentInterface, BaseAgent, Program
+from core.interfaces import MetricsLoggerInterface, BaseAgent, Program
 from config import settings  # For default metric values if needed
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ DEFAULT_METRIC_FIELDS = [
 ]
 
 
-class MonitoringAgent(MonitoringAgentInterface, BaseAgent):
+class MetricsLogger(MetricsLoggerInterface, BaseAgent):
     def __init__(self, config: Optional[Dict[str, Any]] = None, metrics_file_path: Optional[str] = None,
                  log_format: str = "jsonl"):
         super().__init__(config)
@@ -49,7 +49,7 @@ class MonitoringAgent(MonitoringAgentInterface, BaseAgent):
             self.metrics_file = metrics_file_path if metrics_file_path else METRICS_FILE_JSONL
 
         logger.info(
-            f"MonitoringAgent initialized. Logging metrics to '{self.metrics_file}' in '{self.log_format}' format.")
+            f"MetricsLogger initialized. Logging metrics to '{self.metrics_file}' in '{self.log_format}' format.")
         self._ensure_metrics_file_header()
 
     def _ensure_metrics_file_header(self):  # Method_v1.0.1 (No change needed as it uses updated DEFAULT_METRIC_FIELDS)
@@ -115,10 +115,10 @@ class MonitoringAgent(MonitoringAgentInterface, BaseAgent):
             except Exception as e_jsonl:
                 logger.error(f"Unexpected error writing generation metrics to JSONL: {e_jsonl}", exc_info=True)
 
-        await self.report_generation_summary_to_console(log_entry)  # Pass the processed log_entry
+        await self.print_gen_summary(log_entry)  # Pass the processed log_entry
 
-    # --- MODIFIED: report_generation_summary_to_console (Blueprint Step 6) ---
-    async def report_generation_summary_to_console(self, generation_data: Dict[str, Any]):  # Method_v1.2.0
+    # --- MODIFIED: print_gen_summary (Blueprint Step 6) ---
+    async def print_gen_summary(self, generation_data: Dict[str, Any]):  # Method_v1.2.0
         gen = generation_data.get('generation_number', 'N/A')
         task_id = generation_data.get('task_id', 'N/A')
         avg_correct = generation_data.get('avg_correctness', float('nan'))
@@ -149,7 +149,7 @@ class MonitoringAgent(MonitoringAgentInterface, BaseAgent):
 
         logger.info("\n".join(summary_lines))
 
-    async def log_final_summary(self, best_program_overall: Optional[Program], total_runtime_sec: float,
+    async def log_run_summary(self, best_program_overall: Optional[Program], total_runtime_sec: float,
                                 task_id: str,
                                 total_llm_api_calls_session: int):  # Method_v1.1.0 (Added llm_judge_overall_score to summary)
         logger.info("--- Evolutionary Run Final Summary ---")
@@ -169,19 +169,19 @@ class MonitoringAgent(MonitoringAgentInterface, BaseAgent):
                 "llm_judge_overall_score": f"{best_program_overall.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10"
             }
             logger.info(f"  Fitness Summary: {fitness_summary}")
-            if best_program_overall.llm_judge_feedback:  # Also log the feedback if available
-                logger.info(f"  LLM Judge Feedback: {best_program_overall.llm_judge_feedback}")
+            if best_program_overall.ai_feedback:  # Also log the feedback if available
+                logger.info(f"  LLM Judge Feedback: {best_program_overall.ai_feedback}")
             # logger.info(f"  Code:\n{best_program_overall.code}") # Careful with long code
         else:
             logger.info("No successful program was evolved to be deemed 'best overall'.")
 
     async def log_metrics(self, metrics: Dict):
-        logger.warning("MonitoringAgent.log_metrics() is deprecated. Use log_generation_metrics() instead.")
+        logger.warning("MetricsLogger.log_metrics() is deprecated. Use log_generation_metrics() instead.")
         pass
 
     async def report_status(self):
         logger.warning(
-            "MonitoringAgent.report_status() is deprecated. Generation summaries are now logged automatically.")
+            "MetricsLogger.report_status() is deprecated. Generation summaries are now logged automatically.")
         pass
 
     async def execute(self, action: str,
@@ -189,8 +189,8 @@ class MonitoringAgent(MonitoringAgentInterface, BaseAgent):
         if action == "log_generation_metrics" and payload:
             await self.log_generation_metrics(payload)
             return {"status": "generation metrics logged"}
-        elif action == "log_final_summary" and payload:
-            await self.log_final_summary(
+        elif action == "log_run_summary" and payload:
+            await self.log_run_summary(
                 best_program_overall=payload.get("best_program_overall"),
                 total_runtime_sec=payload.get("total_runtime_sec", 0),
                 task_id=payload.get("task_id", "unknown_task"),
@@ -198,5 +198,5 @@ class MonitoringAgent(MonitoringAgentInterface, BaseAgent):
             )
             return {"status": "final summary logged"}
         else:
-            logger.warning(f"Unknown action '{action}' or missing payload for MonitoringAgent.execute().")
+            logger.warning(f"Unknown action '{action}' or missing payload for MetricsLogger.execute().")
             return {"status": f"unknown action '{action}' or missing data"}

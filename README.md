@@ -29,21 +29,21 @@ OpenAlpha_Evolve is a step towards this vision. It's not just about generating c
 OpenAlpha_Evolve employs a modular, agent-based architecture to orchestrate an evolutionary process:
 
 1.  **Task Definition**: You, the user, define the algorithmic "quest" – the problem to be solved, including examples of inputs and expected outputs.
-2.  **Prompt Engineering (`PromptDesignerAgent`)**: This agent crafts intelligent prompts for the LLM. It designs:
+2.  **Prompt Engineering (`PromptStudio`)**: This agent crafts intelligent prompts for the LLM. It designs:
     *   *Initial Prompts*: To generate the first set of candidate solutions.
     *   *Mutation Prompts*: To introduce variations and improvements to existing solutions, often requesting changes in a "diff" format.
     *   *Bug-Fix Prompts*: To guide the LLM in correcting errors from previous attempts, also typically expecting a "diff".
-3.  **Code Generation (`CodeGeneratorAgent`)**: Powered by an LLM (currently configured for Gemini), this agent takes the prompts and generates Python code. If a "diff" is requested and received, it attempts to apply the changes to the parent code.
-4.  **Evaluation (`EvaluatorAgent`)**: The generated code is put to the test!
+3.  **Code Generation (`CodeProducer`)**: Powered by an LLM (currently configured for Gemini), this agent takes the prompts and generates Python code. If a "diff" is requested and received, it attempts to apply the changes to the parent code.
+4.  **Evaluation (`SolutionEvaluator`)**: The generated code is put to the test!
     *   *Syntax Check*: Is the code valid Python?
     *   *Execution*: The code is run in a temporary, isolated environment against the input/output examples defined in the task.
     *   *Fitness Scoring*: Programs are scored based on correctness (how many test cases pass), efficiency (runtime), and other potential metrics.
 5.  **Database (`DatabaseAgent`)**: All programs (code, fitness scores, generation, lineage) are stored, creating a record of the evolutionary history (currently in-memory).
-6.  **Selection (`SelectionControllerAgent`)**: The "survival of the fittest" principle in action. This agent selects:
+6.  **Selection (`EvoSelector`)**: The "survival of the fittest" principle in action. This agent selects:
     *   *Parents*: Promising programs from the current generation to produce offspring.
     *   *Survivors*: The best programs from both the current population and new offspring to advance to the next generation.
 7.  **Iteration**: This cycle repeats for a defined number of generations, with each new generation aiming to produce better solutions than the last.
-8.  **Orchestration (`TaskManagerAgent`)**: The maestro of the operation, coordinating all other agents and managing the overall evolutionary loop.
+8.  **Orchestration (`EvolveFlow`)**: The maestro of the operation, coordinating all other agents and managing the overall evolutionary loop.
 
 ---
 
@@ -147,17 +147,17 @@ Want to challenge OpenAlpha_Evolve with a new problem? It's easy:
 2.  **Modify the `TaskDefinition` object**:
     *   `id`: A unique string identifier for your task (e.g., "sort_list_task").
     *   `description`: A clear, detailed natural language description of the problem. This is crucial for the LLM to understand what to do. Be specific about function names, expected behavior, and constraints.
-    *   `function_name_to_evolve`: The name of the Python function the agent should try to create/evolve (e.g., "custom_sort").
-    *   `input_output_examples`: A list of dictionaries, each containing an `input` (arguments for your function) and the corresponding expected `output`. These are vital for evaluation.
+    *   `evolve_function`: The name of the Python function the agent should try to create/evolve (e.g., "custom_sort").
+    *   `io_examples`: A list of dictionaries, each containing an `input` (arguments for your function) and the corresponding expected `output`. These are vital for evaluation.
         *   Inputs should be provided as a list if the function takes multiple positional arguments, or as a single value if it takes one.
         *   Use `float('inf')` or `float('-inf')` directly in your Python code defining these examples if needed by your problem (the evaluation harness handles JSON serialization/deserialization of these).
     *   `allowed_imports`: Specify a list of Python standard libraries that the generated code is allowed to import (e.g., `["heapq", "math", "sys"]`). This helps guide the LLM and can be important for the execution sandbox.
     *   (Optional) `evaluation_criteria`: Define how success is measured (currently primarily driven by correctness based on test cases).
-    *   (Optional) `initial_code_prompt`: Override the default initial prompt if you need more specific instructions for the first code generation attempt.
+    *   (Optional) `initial_prompt_override`: Override the default initial prompt if you need more specific instructions for the first code generation attempt.
 
 3.  **Run the agent** as before: `python -m main`.
 
-The quality of your `description` and the comprehensiveness of your `input_output_examples` significantly impact the agent's success!
+The quality of your `description` and the comprehensiveness of your `io_examples` significantly impact the agent's success!
 
 ---
 
@@ -168,7 +168,7 @@ OpenAlpha_Evolve is a living project. Here are some directions we're excited to 
 *   **Advanced Evaluation Sandboxing**: Implementing more robust, secure sandboxing (e.g., using Docker or `nsjail`) for code execution to handle potentially unsafe code and complex dependencies.
 *   **Sophisticated Fitness Metrics**: Beyond correctness and basic runtime, incorporating checks for code complexity (e.g., cyclomatic complexity), style (linting), resource usage (memory), and custom domain-specific metrics.
 *   **Reinforcement Learning for Prompt Strategy**: Implementing the `RLFineTunerAgent` to dynamically optimize prompt engineering strategies based on performance feedback.
-*   **Enhanced Monitoring & Visualization**: Developing tools (via `MonitoringAgent`) to visualize the evolutionary process, track fitness landscapes, and understand agent behavior (e.g., using a simple web dashboard or plots).
+*   **Enhanced Monitoring & Visualization**: Developing tools (via `MetricsLogger`) to visualize the evolutionary process, track fitness landscapes, and understand agent behavior (e.g., using a simple web dashboard or plots).
 *   **Broader LLM Support**: Adding easy integrations for other powerful LLMs (e.g., OpenAI models, Anthropic Claude).
 *   **Self-Correction & Reflection**: Enabling the agent to analyze its own failures more deeply (e.g., analyze error messages, identify patterns in failed tests) and refine its problem-solving approach.
 *   **Diverse Task Domains**: Applying OpenAlpha_Evolve to a wider range of problems in science, engineering, data analysis, and creative coding.

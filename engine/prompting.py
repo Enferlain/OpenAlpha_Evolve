@@ -9,18 +9,18 @@ from core.interfaces import PromptDesignerInterface, Program, TaskDefinition, Ba
 logger = logging.getLogger(__name__)
 
 
-class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
+class PromptStudio(PromptDesignerInterface, BaseAgent):
     def __init__(self, task_definition: TaskDefinition): # TaskDefinition might not be needed for all prompts if passed directly
         super().__init__()
         # Storing task_definition here might be useful for general context,
         # but specific methods will receive the relevant task/program objects.
         self.task_definition_context = task_definition # Store for general reference if needed
         logger.info(
-            f"PromptDesignerAgent initialized. Context Task ID: {self.task_definition_context.id if self.task_definition_context else 'None'}"
+            f"PromptStudio initialized. Context Task ID: {self.task_definition_context.id if self.task_definition_context else 'None'}"
         )
 
     # --- NEW HELPER METHOD (v1.0.0 for this specific helper) ---
-    def _format_static_analysis_feedback_for_llm(self, program_errors: List[str]) -> str:  # Method_v1.0.0
+    def _format_analysis_feedback(self, program_errors: List[str]) -> str:  # Method_v1.0.0
         """
         Formats static analysis feedback (currently Ruff) from program.errors for the LLM.
         """
@@ -46,12 +46,12 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
 
         return "Static Analysis Feedback (from Ruff):\n" + "\n".join(formatted_errors)
 
-    # Helper: _format_input_output_examples (as before)
-    def _format_input_output_examples(self, task: TaskDefinition) -> str:
-        if not task.input_output_examples:
+    # Helper: _format_io_examples (as before)
+    def _format_io_examples(self, task: TaskDefinition) -> str:
+        if not task.io_examples:
             return "No input/output examples provided."
         formatted_examples = []
-        for i, example in enumerate(task.input_output_examples):
+        for i, example in enumerate(task.io_examples):
             input_str = str(example.get('input'))
             output_str = str(example.get('output'))
             formatted_examples.append(f"Example {i + 1}:\n  Input: {input_str}\n  Expected Output: {output_str}")
@@ -67,7 +67,7 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
         return "Brief History of Recent Ancestors (to consider and avoid repeating less successful paths):\n" + "\n".join(
             history_lines) + "\n\n"
 
-    def design_initial_prompt(self, task: TaskDefinition) -> str:  # Method_v_blueprint_1.0.0
+    def initial_prompt(self, task: TaskDefinition) -> str:  # Method_v_blueprint_1.0.0
         logger.info(f"Designing initial prompt for task: {task.id} (Blueprint Aligned)")
 
         prompt_parts = [
@@ -75,16 +75,16 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             f"## Overall Goal & Context:\n{task.description}\n\n"
         ]
 
-        if task.target_solution_description:
-            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution_description}\n\n")
-        elif task.function_name_to_evolve:  # Fallback or hint if no target_solution_description
+        if task.target_solution:
+            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution}\n\n")
+        elif task.evolve_function:  # Fallback or hint if no target_solution
             prompt_parts.append(
-                f"## Primary Function to Implement (if applicable):\n`{task.function_name_to_evolve}`\n\n")
+                f"## Primary Function to Implement (if applicable):\n`{task.evolve_function}`\n\n")
 
-        if task.initial_seed_code_or_ideas:
+        if task.initial_seed:
             prompt_parts.append(
                 f"## Starting Point (Seed Code or Ideas to Build Upon/Consider):\n"
-                f"```text\n{task.initial_seed_code_or_ideas}\n```\n\n"  # Use text block for ideas too
+                f"```text\n{task.initial_seed}\n```\n\n"  # Use text block for ideas too
             )
 
         if task.suggested_imports:
@@ -95,13 +95,13 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
                 f"Consider using these standard libraries if helpful: {', '.join(task.allowed_imports)}.\n\n")
 
         # Mention how it will be evaluated
-        if task.evaluation_guidelines_for_llm_judge:
+        if task.ai_criteria:
             prompt_parts.append(
                 f"## Evaluation Focus:\nYour solution will be primarily evaluated by an AI Judge based on the following guidelines. Strive to meet these criteria:\n"
-                f"{task.evaluation_guidelines_for_llm_judge}\n\n"
+                f"{task.ai_criteria}\n\n"
             )
-        elif task.input_output_examples:  # Fallback to I/O examples if no LLM judge guidelines
-            formatted_examples = self._format_input_output_examples(task)
+        elif task.io_examples:  # Fallback to I/O examples if no LLM judge guidelines
+            formatted_examples = self._format_io_examples(task)
             prompt_parts.append(
                 f"## Evaluation Focus:\nYour solution will be evaluated for correctness based on input/output examples like these:\n{formatted_examples}\n\n"
             )
@@ -117,7 +117,7 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
         logger.debug(f"Designed blueprint-aligned initial prompt:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
-    def _format_execution_summary_for_judge_prompt(self,
+    def _format_execution_summary(self,
                                                    execution_summary: Dict[str, Any]) -> str:  # NEW HELPER (as before)
         parts = []
         runs_ok = execution_summary.get("runs_without_error")
@@ -156,7 +156,7 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             return "No specific automated check observations were provided."
         return "\n".join(parts)
 
-    def design_crossover_prompt(self, task: TaskDefinition, parent_program1: Program,
+    def crossover_prompt(self, task: TaskDefinition, parent_program1: Program,
                                 parent_program2: Program) -> str:  # Method_v_blueprint_1.0.0
         logger.info(
             f"Designing blueprint-aligned crossover prompt for task: {task.id} using parents {parent_program1.id} and {parent_program2.id}")
@@ -166,9 +166,9 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
                 f"--- Parent {number} (ID: {parent_prog.id}, Gen: {parent_prog.generation}) ---",
                 f"Code:\n```python\n{parent_prog.code}\n```"
             ]
-            if parent_prog.llm_judge_feedback:
+            if parent_prog.ai_feedback:
                 parts.append(
-                    f"Parent {number} AI Judge Assessment (Score: {parent_prog.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n{parent_prog.llm_judge_feedback}"
+                    f"Parent {number} AI Judge Assessment (Score: {parent_prog.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n{parent_prog.ai_feedback}"
                 )
             # Add brief summary of other key metrics if desired
             # ruff_v = parent_prog.fitness_scores.get('ruff_violations', 'N/A')
@@ -184,11 +184,11 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             f"Your task is to perform a 'genetic crossover' on two parent Python solutions to create a new, potentially superior child solution.\n\n"
             f"## Overall Goal & Context:\n{task.description}\n"
         ]
-        if task.target_solution_description:
-            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution_description}\n")
-        if task.evaluation_guidelines_for_llm_judge:
+        if task.target_solution:
+            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution}\n")
+        if task.ai_criteria:
             prompt_parts.append(
-                f"## Primary Evaluation Guidelines for Child (Aim to excel here):\n{task.evaluation_guidelines_for_llm_judge}\n"
+                f"## Primary Evaluation Guidelines for Child (Aim to excel here):\n{task.ai_criteria}\n"
             )
         prompt_parts.append("\n")
 
@@ -202,7 +202,7 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             f"1. Effectively solves the 'Overall Goal & Context'.\n"
             f"2. Synthesizes the best features, logic, or approaches from *both* parents, while AVOIDING flaws identified in either parent by the AI Judge.\n"
             f"3. Aims to satisfy the 'Primary Evaluation Guidelines' better than both parents.\n"
-            f"4. Adheres to any specified solution structure (e.g., target_solution_description) and suggested imports.\n\n"
+            f"4. Adheres to any specified solution structure (e.g., target_solution) and suggested imports.\n\n"
             f"Your Response Format:\n"
             f"Provide *only* the complete Python code for the new child solution. "
             f"No surrounding text, explanations, comments outside the code, or markdown code fences."
@@ -246,7 +246,7 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
 
         # 2. Static Analysis Metric Feedback (Ruff, Radon - from fitness_scores)
         # These are the numerical scores that the SelectionController also uses.
-        # The detailed Ruff messages are handled by _format_static_analysis_feedback_for_llm.
+        # The detailed Ruff messages are handled by _format_analysis_feedback.
         # Here, we report the *summary scores* if they are primary focus metrics or generally informative.
 
         ruff_violations = program.fitness_scores.get("ruff_violations")
@@ -287,7 +287,7 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
 
         return "Summary of the previous version's evaluation:\n" + "\n".join(feedback_parts)
 
-    def design_mutation_prompt(self, task: TaskDefinition, parent_program: Program,
+    def mutation_prompt(self, task: TaskDefinition, parent_program: Program,
                                ancestral_summary: Optional[List[Dict[str, Any]]] = None
                                ) -> str:  # Method_v_blueprint_1.0.1 (Signature updated)
         logger.info(
@@ -298,23 +298,23 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             f"You are an expert Python programmer. Your task is to REFINE and IMPROVE an existing Python solution based on previous evaluations and the overall task goals.\n\n"
             f"## Overall Goal & Context:\n{task.description}\n\n"
         ]
-        if task.target_solution_description:
-            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution_description}\n\n")
+        if task.target_solution:
+            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution}\n\n")
 
         prompt_parts.append(
             f"## Current Code (Version from Generation {parent_program.generation}):\n```python\n{parent_program.code}\n```\n\n")
 
         prompt_parts.append(f"## Feedback on Current Code:\n")
 
-        if parent_program.llm_judge_feedback:
+        if parent_program.ai_feedback:
             prompt_parts.append(
                 f"### AI Judge's Assessment (Overall Score: {parent_program.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n"
-                f"{parent_program.llm_judge_feedback}\n\n"
+                f"{parent_program.ai_feedback}\n\n"
             )
-        elif task.evaluation_guidelines_for_llm_judge:
+        elif task.ai_criteria:
             prompt_parts.append(
                 f"### Reminder of Evaluation Guidelines (Aim for these):\n"
-                f"{task.evaluation_guidelines_for_llm_judge}\n\n"
+                f"{task.ai_criteria}\n\n"
             )
 
         exec_status = "Ran successfully" if parent_program.fitness_scores.get(
@@ -324,7 +324,7 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             prompt_parts.append(
                 f"- I/O Test Correctness: {parent_program.fitness_scores.get('correctness', 0.0) * 100:.1f}%\n")
 
-        static_analysis_summary = self._format_static_analysis_feedback_for_llm(parent_program.errors)
+        static_analysis_summary = self._format_analysis_feedback(parent_program.errors)
         prompt_parts.append(f"{static_analysis_summary}\n")
 
         critical_errors = [e for e in parent_program.errors if not e.startswith(
@@ -343,8 +343,8 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             f"Address the weaknesses pointed out by the AI Judge and fix any reported errors or static analysis issues.\n"
             f"Strive to better meet the 'User's Evaluation Guidelines' (mentioned in the AI Judge's feedback or the task context).\n"
         )
-        if task.specific_improvement_directives:
-            prompt_parts.append(f"Also consider these specific directives: {task.specific_improvement_directives}\n")
+        if task.refine_goals:
+            prompt_parts.append(f"Also consider these specific directives: {task.refine_goals}\n")
         if task.primary_focus_metrics:
             prompt_parts.append(
                 f"Consider improving these metrics if possible: {', '.join(task.primary_focus_metrics)}.\n")
@@ -367,8 +367,8 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             f"Designed blueprint-aligned mutation prompt (requesting diff):\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
-    # In PromptDesignerAgent
-    def design_bug_fix_prompt(self, task: TaskDefinition, program: Program,  # Removed error_message, execution_output
+    # In PromptStudio
+    def bugfix_prompt(self, task: TaskDefinition, program: Program,  # Removed error_message, execution_output
                               ancestral_summary: Optional[List[Dict[str, Any]]] = None
                               ) -> str:  # Method_v_blueprint_1.0.1 (Signature updated, typo fixed)
         logger.info(
@@ -379,8 +379,8 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             f"You are an expert Python programmer. Your task is to FIX CRITICAL ISSUES in an existing Python solution based on previous evaluations and the overall task goals.\n\n"
             f"## Overall Goal & Context:\n{task.description}\n\n"
         ]
-        if task.target_solution_description:
-            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution_description}\n\n")
+        if task.target_solution:
+            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution}\n\n")
 
         prompt_parts.append(
             f"## Buggy Code (Version from Generation {program.generation}):\n```python\n{program.code}\n```\n\n")
@@ -395,21 +395,21 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             primary_failure_reason += f"\n  - Key Error: {critical_errors_from_program[0]}"
         elif "failed_evaluation_syntax" in program.status and critical_errors_from_program:
             primary_failure_reason += f"\n  - Syntax Error: {critical_errors_from_program[0]}"
-        elif program.llm_judge_feedback and (program.fitness_scores.get('llm_judge_overall_score', 10) <= 3):
+        elif program.ai_feedback and (program.fitness_scores.get('llm_judge_overall_score', 10) <= 3):
             primary_failure_reason = (
                 f"The AI Judge gave a very low score ({program.fitness_scores.get('llm_judge_overall_score')}/10) "
-                f"indicating critical flaws. Judge's Justification:\n{program.llm_judge_feedback}")
+                f"indicating critical flaws. Judge's Justification:\n{program.ai_feedback}")
 
         prompt_parts.append(f"### Primary Problem:\n{primary_failure_reason}\n\n")
 
         # *** FIXED TYPO HERE: program.fitness_scores instead of parent_program.fitness_scores ***
-        if program.llm_judge_feedback and not (program.fitness_scores.get('llm_judge_overall_score', 10) <= 3):
+        if program.ai_feedback and not (program.fitness_scores.get('llm_judge_overall_score', 10) <= 3):
             prompt_parts.append(
                 f"### AI Judge's Assessment (Overall Score: {program.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n"  # Was parent_program
-                f"{program.llm_judge_feedback}\n\n"
+                f"{program.ai_feedback}\n\n"
             )
 
-        static_analysis_summary = self._format_static_analysis_feedback_for_llm(program.errors)
+        static_analysis_summary = self._format_analysis_feedback(program.errors)
         prompt_parts.append(f"{static_analysis_summary}\n")
 
         if critical_errors_from_program and (not ("failed_evaluation_execution" in program.status) and not (
@@ -446,7 +446,7 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             f"Designed blueprint-aligned bug-fix prompt (requesting diff):\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
-    def design_failed_diff_fallback_prompt(self, task: TaskDefinition, original_program: Program,
+    def diff_fallback_prompt(self, task: TaskDefinition, original_program: Program,
                                            previous_attempt_summary: str,  # Goal of the failed diff
                                            ancestral_summary: Optional[
                                                List[Dict[str, Any]]] = None) -> str:  # Method_v_blueprint_1.0.0
@@ -458,20 +458,20 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             f"You are an expert Python programmer. Your previous attempt to provide improvements for the following code via a diff format was unsuccessful or resulted in no changes. You will now provide the complete, improved code.\n\n"
             f"## Overall Goal & Context:\n{task.description}\n"
         ]
-        if task.target_solution_description:
-            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution_description}\n")
+        if task.target_solution:
+            prompt_parts.append(f"## Expected Solution Output:\n{task.target_solution}\n")
 
         prompt_parts.append(
             f"\n## Original Code (that was attempted to be diffed):\n```python\n{original_program.code}\n```\n\n")
 
         # Feedback on Original Code
         prompt_parts.append(f"## Feedback on Original Code (that the failed diff was targeting):\n")
-        if original_program.llm_judge_feedback:
+        if original_program.ai_feedback:
             prompt_parts.append(
-                f"### AI Judge's Assessment (Score: {original_program.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n{original_program.llm_judge_feedback}\n\n"
+                f"### AI Judge's Assessment (Score: {original_program.fitness_scores.get('llm_judge_overall_score', 'N/A')}/10):\n{original_program.ai_feedback}\n\n"
             )
 
-        static_analysis_summary = self._format_static_analysis_feedback_for_llm(original_program.errors)
+        static_analysis_summary = self._format_analysis_feedback(original_program.errors)
         prompt_parts.append(f"{static_analysis_summary}\n")  # Ruff issues
 
         critical_errors = [e for e in original_program.errors if not e.startswith(
@@ -501,24 +501,24 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
             f"Designed blueprint-aligned failed-diff fallback prompt:\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
-    # --- MODIFIED: design_llm_judge_prompt (Corrected f-string formatting) ---
-    def design_llm_judge_prompt(self,
+    # --- MODIFIED: judge_prompt (Corrected f-string formatting) ---
+    def judge_prompt(self,
                                 task: TaskDefinition,
                                 program_to_judge: Program,
                                 execution_summary: Dict[str, Any]
                                 ) -> str:  # Method_v1.0.1
         logger.info(f"Designing LLM judge prompt for Program ID: {program_to_judge.id}, Task ID: {task.id}")
 
-        formatted_observations = self._format_execution_summary_for_judge_prompt(execution_summary)
+        formatted_observations = self._format_execution_summary(execution_summary)
 
         # Using the (f"..." f"...") style for consistency and readability
         prompt = (
             f"You are an impartial and expert AI Code Reviewer. Your task is to meticulously evaluate a provided Python code solution based on the given task context, user guidelines, and observed behaviors.\n\n"
             f"## Task Context & Goal:\n"
             f"Problem Description:\n{task.description}\n\n"
-            f"Target Solution Description:\n{task.target_solution_description if task.target_solution_description else 'Not explicitly specified, infer from problem description.'}\n\n"
+            f"Target Solution Description:\n{task.target_solution if task.target_solution else 'Not explicitly specified, infer from problem description.'}\n\n"
             f"## User's Evaluation Guidelines:\n"
-            f"Please judge the code primarily based on these guidelines:\n{task.evaluation_guidelines_for_llm_judge if task.evaluation_guidelines_for_llm_judge else 'No specific user guidelines provided. Use general principles of good code quality, correctness for the task, and creativity.'}\n\n"
+            f"Please judge the code primarily based on these guidelines:\n{task.ai_criteria if task.ai_criteria else 'No specific user guidelines provided. Use general principles of good code quality, correctness for the task, and creativity.'}\n\n"
             f"## Code for Review:\n```python\n{program_to_judge.code}\n```\n\n"
             f"## Observations from Automated Checks:\n{formatted_observations}\n\n"
             f"## Your Evaluation Task:\n"
@@ -535,4 +535,4 @@ class PromptDesignerAgent(PromptDesignerInterface, BaseAgent):
 
     async def execute(self, *args, **kwargs) -> Any:
         raise NotImplementedError(
-            "PromptDesignerAgent.execute() is not the primary way to use this agent. Call specific design methods.")
+            "PromptStudio.execute() is not the primary way to use this agent. Call specific design methods.")
