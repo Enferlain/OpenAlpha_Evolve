@@ -367,10 +367,9 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
             f"Designed blueprint-aligned mutation prompt (requesting diff):\n--PROMPT START--\n{prompt}\n--PROMPT END--")
         return prompt
 
-    # In PromptStudio
-    def bugfix_prompt(self, task: TaskDefinition, program: Program,  # Removed error_message, execution_output
-                              ancestral_summary: Optional[List[Dict[str, Any]]] = None
-                              ) -> str:  # Method_v_blueprint_1.0.1 (Signature updated, typo fixed)
+    def bugfix_prompt(self, task: TaskDefinition, program: Program,
+                      ancestral_summary: Optional[List[Dict[str, Any]]] = None
+                      ) -> str:
         logger.info(
             f"Designing blueprint-aligned bug-fix prompt for program: {program.id} (Gen: {program.generation})"
         )
@@ -387,49 +386,86 @@ class PromptStudio(PromptDesignerInterface, BaseAgent):
 
         prompt_parts.append(f"## Feedback on Buggy Code:\n")
 
-        primary_failure_reason = f"The code failed with status: {program.status}."
-        critical_errors_from_program = [e for e in program.errors if not e.startswith(
-            "Ruff-") and "Execution Log (STDOUT" not in e and "Execution Log (STDERR" not in e]
+        # --- Refined "Primary Problem" determination ---
+        primary_failure_detail = ""
+        # 1. Prioritize STDERR from a standalone script execution failure
+        for err_msg in program.errors:
+            if "Standalone script execution failed" in err_msg and "\nSTDERR:\n" in err_msg:
+                # Extract the content after "\nSTDERR:\n"
+                stderr_content = err_msg.split("\nSTDERR:\n", 1)[-1].strip()
+                if stderr_content:  # Ensure there's actual stderr content
+                    primary_failure_detail = (
+                        f"Script execution failed with STDERR:\n{stderr_content[:300]}"
+                        f"{'...' if len(stderr_content) > 300 else ''}"
+                    )
+                else:  # STDERR was mentioned but empty
+                    primary_failure_detail = "Script execution failed, but no specific STDERR content was captured."
+                break  # Found the most specific execution error
 
-        if "failed_evaluation_execution" in program.status and critical_errors_from_program:
-            primary_failure_reason += f"\n  - Key Error: {critical_errors_from_program[0]}"
-        elif "failed_evaluation_syntax" in program.status and critical_errors_from_program:
-            primary_failure_reason += f"\n  - Syntax Error: {critical_errors_from_program[0]}"
+        # 2. If no specific STDERR, look for other critical errors (non-Ruff, non-info)
+        if not primary_failure_detail:
+            # Filter out Ruff messages and common informational messages
+            informational_error_patterns = [
+                "execution log (stdout for",
+                "execution log (stderr for",  # Non-fatal stderr
+                "evaluation: task 'task_focused' but no i/o examples"
+            ]
+            critical_errors_from_program = [
+                e for e in program.errors
+                if not e.strip().lower().startswith("ruff-") and
+                   not any(info_pattern in e.strip().lower() for info_pattern in informational_error_patterns)
+            ]
+            if "failed_evaluation_execution" in program.status and critical_errors_from_program:
+                primary_failure_detail = f"Key Execution Issue: {critical_errors_from_program[0]}"
+            elif "failed_evaluation_syntax" in program.status and critical_errors_from_program:
+                primary_failure_detail = f"Syntax Error: {critical_errors_from_program[0]}"
+            elif "failed_evaluation_internal_critical" in program.status and critical_errors_from_program:
+                primary_failure_detail = f"Critical Internal Evaluation Error: {critical_errors_from_program[0]}"
+
+        primary_failure_reason = f"The code previously failed with status: '{program.status}'."
+        if primary_failure_detail:
+            primary_failure_reason += f"\n  - Specific Detail: {primary_failure_detail}"
+        # 3. If still no specific execution error, consider very low AI Review score as primary problem
         elif program.ai_review_feedback and (program.fitness_scores.get('ai_review_score', 10) <= 3):
             primary_failure_reason = (
                 f"The Ai Reviewer gave a very low score ({program.fitness_scores.get('ai_review_score')}/10) "
-                f"indicating critical flaws. Ai Reviewer's Justification:\n{program.ai_review_feedback}")
+                f"indicating critical flaws. Ai Reviewer's Justification:\n{program.ai_review_feedback}"
+            )
+        elif not primary_failure_detail:  # Generic if no other specific detail found and AI Review score isn't critically low
+            primary_failure_reason += "\n  - No specific execution error detail parsed, or AI Review was not critically low. Please review all feedback to improve."
+        # --- End Refined "Primary Problem" ---
 
-        prompt_parts.append(f"### Primary Problem:\n{primary_failure_reason}\n\n")
+        prompt_parts.append(f"### Primary Problem to Address:\n{primary_failure_reason}\n\n")
 
-        # *** FIXED TYPO HERE: program.fitness_scores instead of parent_program.fitness_scores ***
-        if program.ai_review_feedback and not (program.fitness_scores.get('ai_review_score', 10) <= 3):
+        # Include AI Reviewer's Assessment (if available and not already the primary problem statement)
+        # This is useful even if the primary problem was an execution crash, as the review might cover other aspects.
+        if program.ai_review_feedback and not (
+        primary_failure_reason.startswith("The Ai Reviewer gave a very low score")):
             prompt_parts.append(
-                f"### Ai Reviewer's Assessment (Overall Score: {program.fitness_scores.get('ai_review_score', 'N/A')}/10):\n"  # Was parent_program
+                f"### Ai Reviewer's Assessment (Overall Score: {program.fitness_scores.get('ai_review_score', 'N/A')}/10):\n"
                 f"{program.ai_review_feedback}\n\n"
             )
 
-        static_analysis_summary = self._format_analysis_feedback(program.errors)
+        # Static Analysis Feedback (Ruff)
+        static_analysis_summary = self._format_analysis_feedback(program.errors)  # Using the helper
         prompt_parts.append(f"{static_analysis_summary}\n")
 
-        if critical_errors_from_program and (not ("failed_evaluation_execution" in program.status) and not (
-                "failed_evaluation_syntax" in program.status)):
-            prompt_parts.append(f"### Other Critical Issues from Last Attempt:\n" + "\n".join(
-                [f"  - {ce}" for ce in critical_errors_from_program]) + "\n\n")
-
+        # Ancestral History
         historical_context_section = self._format_ancestral_summary_for_prompt(ancestral_summary)
         if historical_context_section:
             prompt_parts.append(historical_context_section)
 
+        # --- Bug-Fix Goal ---
         prompt_parts.append(
             f"## Your Bug-Fix Goal:\n"
-            f"Analyze the 'Buggy Code' and all the feedback. Your primary goal is to FIX the identified 'Primary Problem'.\n"
-            f"Also address any other reported errors or static analysis issues.\n"
-            f"The corrected solution must work as intended by the 'Overall Goal & Context'.\n"
+            f"Carefully analyze the 'Buggy Code' and all the provided feedback. Your primary objective is to **FIX the identified 'Primary Problem to Address'**.\n"
+            f"Also, try to address any other reported static analysis issues or critiques from the Ai Reviewer if applicable.\n"
+            f"The corrected solution must robustly work as intended by the 'Overall Goal & Context' and 'Expected Solution Output'.\n"
         )
 
+        # --- Response Format (Requesting Diffs) ---
         prompt_parts.append(
-            f"\nYour Response Format:\n"  # Diff instructions as before
+            f"\nYour Response Format:\n"
             f"Propose fixes by providing changes as a sequence of diff blocks. "
             f"Each diff block must follow this exact format:\n"
             f"<<<<<<< SEARCH\n"

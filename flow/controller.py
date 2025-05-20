@@ -322,6 +322,16 @@ class EvolveFlow(TaskManagerInterface):
                 self.code_generator.reset_api_call_count_generation()
             logger.info(f"--- Generation {gen}/{self.num_generations} ---")
 
+            # --- START NEW DETAILED LOGGING ---
+            logger.debug(f"Generation {gen}: Current population (size {len(current_population)}) BEFORE parent selection:")
+            for p_idx, p_prog in enumerate(current_population[:min(len(current_population), 5)]): # Log first 5
+                 logger.debug(
+                     f"  Pop item {p_idx} ID: {p_prog.id}, Gen: {p_prog.generation}, Status: {p_prog.status}, "
+                     f"RunsOK? {p_prog.fitness_scores.get('runs_without_error', 'N/A')}, "
+                     f"AIReviewScore: {p_prog.fitness_scores.get('ai_review_score', 'N/A')}"
+                 )
+            # --- END NEW DETAILED LOGGING ---
+
             parents = self.selection_controller.get_parents(current_population, self.num_parents_to_select,
                                                                self.task_definition)
             if not parents:

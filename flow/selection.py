@@ -30,8 +30,20 @@ class EvoSelector(SelectionControllerInterface, BaseAgent):
         """
         key_parts: List[Union[float, int]] = []
 
+        # --- START NEW DETAILED LOGGING ---
+        logger.debug(
+            f"[_get_program_sort_key] Evaluating Program ID: {program.id}, Gen: {program.generation}, Status: {program.status}"
+        )
+        logger.debug(f"[_get_program_sort_key] Raw fitness_scores for {program.id}: {program.fitness_scores}")
+
+        runs_ok_value_from_fitness = program.fitness_scores.get("runs_without_error", False)  # Default to False
+        logger.debug(
+            f"[_get_program_sort_key] For Program ID: {program.id}, 'runs_without_error' from fitness_scores: {runs_ok_value_from_fitness} (type: {type(runs_ok_value_from_fitness)})"
+        )
+        # --- END NEW DETAILED LOGGING ---
+
         # 1. Did it run without error?
-        runs_ok_score = 1.0 if program.fitness_scores.get("runs_without_error", False) else 0.0
+        runs_ok_score = 1.0 if runs_ok_value_from_fitness else 0.0  # Use the fetched value
         key_parts.append(runs_ok_score)
 
         # 2. AI Review Score (higher is better)  <--- UPDATED SECTION

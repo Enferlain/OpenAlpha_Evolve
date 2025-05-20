@@ -754,7 +754,7 @@ print(json.dumps(final_output, default=custom_json_serializer))
                 _temp_file_obj.close()
 
                 current_file_dir = os.path.dirname(os.path.abspath(__file__)) # Correct pathing for Ruff
-                project_root_path = os.path.dirname(os.path.dirname(current_file_dir)) # Assuming evaluator_agent is in a subfolder of project root
+                project_root_path = os.path.dirname(current_file_dir)
 
                 # --- Ruff Analysis (Ensuring all violations counted and logged) ---
                 logger.info(f"Running Ruff analysis for program {program.id}...")
