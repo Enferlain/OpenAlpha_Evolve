@@ -28,27 +28,22 @@ class CodeProducer(CodeGeneratorInterface):
         logger.info(f"CodeProducer initialized with model: {self.model_name}")
         # self.max_retries and self.retry_delay_seconds are not used from instance, settings are used directly
 
-    async def generate_code(self, prompt: str, model_name: Optional[str] = None, temperature: Optional[float] = None, output_format: str = "code") -> str:
+    async def generate_code(self, prompt: str, model_name: Optional[str] = None, temperature: Optional[float] = None,
+                            output_format: str = "code") -> str:  # Method_v2.0.0 (Removed redundant diff instructions)
         effective_model_name = model_name if model_name else self.model_name
         logger.info(f"Attempting to generate code using model: {effective_model_name}, output_format: {output_format}")
-        
-        # Add diff instructions if requested
-        if output_format == "diff":
-            prompt += '''
 
-Provide your changes as a sequence of diff blocks in the following format:
-<<<<<<< SEARCH
-# Original code block to be found and replaced
-=======
-# New code block to replace the original
->>>>>>> REPLACE
-Ensure the SEARCH block is an exact segment from the current program.
-Describe each change with such a SEARCH/REPLACE block.
-Make sure that the changes you propose are consistent with each other.
-'''
-        
-        logger.debug(f"Received prompt for code generation (format: {output_format}):\n--PROMPT START--\n{prompt}\n--PROMPT END--")
-        
+        # --- LUMI: REMOVED THIS REDUNDANT BLOCK ---
+        # if output_format == "diff":
+        #     prompt += '''
+        #
+        # Provide your changes as a sequence of diff blocks... (etc.)
+        # '''
+        # --- END LUMI REMOVAL ---
+
+        logger.debug(
+            f"Received prompt for code generation (format: {output_format}):\n--PROMPT START--\n{prompt}\n--PROMPT END--")
+
         current_generation_config = genai.types.GenerationConfig(
             temperature=temperature if temperature is not None else self.generation_config.temperature,
             top_p=self.generation_config.top_p,
@@ -56,7 +51,7 @@ Make sure that the changes you propose are consistent with each other.
         )
         if temperature is not None:
             logger.debug(f"Using temperature override: {temperature}")
-        
+
         model_to_use = genai.GenerativeModel(
             effective_model_name,
             generation_config=current_generation_config
@@ -64,18 +59,16 @@ Make sure that the changes you propose are consistent with each other.
 
         retries = settings.API_MAX_RETRIES
         delay = settings.API_RETRY_DELAY_SECONDS
-        
+
         for attempt in range(retries):
             try:
                 logger.debug(f"API Call Attempt {attempt + 1} of {retries} to {effective_model_name}.")
-                # >>> THIS IS THE ACTUAL API CALL <<<
                 response = await model_to_use.generate_content_async(prompt)
 
-                # Increment counters AFTER the call attempt (whether it succeeds or fails with certain errors)
-                # Or, increment only on *successful* return if that's desired. Let's count attempts that reach the API endpoint.
                 self.api_call_count_session += 1
                 self.api_call_count_generation += 1
-                logger.debug(f"API call made. Generation count: {self.api_call_count_generation}, Session count: {self.api_call_count_session}")
+                logger.debug(
+                    f"API call made. Generation count: {self.api_call_count_generation}, Session count: {self.api_call_count_session}")
 
                 if not response.candidates:
                     logger.warning("Gemini API returned no candidates.")
@@ -87,26 +80,31 @@ Make sure that the changes you propose are consistent with each other.
 
                 generated_text = response.candidates[0].content.parts[0].text
                 logger.debug(f"Raw response from Gemini API:\n--RESPONSE START--\n{generated_text}\n--RESPONSE END--")
-                
+
                 if output_format == "code":
                     cleaned_code = self._clean_output(generated_text)
                     logger.debug(f"Cleaned code:\n--CLEANED CODE START--\n{cleaned_code}\n--CLEANED CODE END--")
                     return cleaned_code
-                else: # output_format == "diff"
-                    logger.debug(f"Returning raw diff text:\n--DIFF TEXT START--\n{generated_text}\n--DIFF TEXT END--")
-                    return generated_text # Return raw diff text
+                else:  # output_format == "diff"
+                    # We are now trusting that the 'prompt' from PromptStudio contained the diff instructions.
+                    # So, the 'generated_text' here should be the diff itself.
+                    logger.debug(
+                        f"Returning raw diff text (expecting diff format from prompt):\n--DIFF TEXT START--\n{generated_text}\n--DIFF TEXT END--")
+                    return generated_text
             except (InternalServerError, DeadlineExceeded, GoogleAPIError) as e:
-                logger.warning(f"Gemini API error on attempt {attempt + 1}: {type(e).__name__} - {e}. Retrying in {delay}s...")
+                logger.warning(
+                    f"Gemini API error on attempt {attempt + 1}: {type(e).__name__} - {e}. Retrying in {delay}s...")
                 if attempt < retries - 1:
                     await asyncio.sleep(delay)
-                    delay *= 2 
+                    delay *= 2
                 else:
                     logger.error(f"Gemini API call failed after {retries} retries for model {effective_model_name}.")
                     raise
             except Exception as e:
-                logger.error(f"An unexpected error occurred during code generation with {effective_model_name}: {e}", exc_info=True)
+                logger.error(f"An unexpected error occurred during code generation with {effective_model_name}: {e}",
+                             exc_info=True)
                 raise
-        
+
         logger.error(f"Code generation failed for model {effective_model_name} after all retries.")
         return ""
 
